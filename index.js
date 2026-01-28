@@ -12,13 +12,20 @@ app.use(express.json());
 const { checkMysqlConnection } = require('./config/db');
 const { createVoterTable, findVoterById, updateVoterFace } = require('./models/Voter');
 const { createLogTable, createLog } = require('./models/Log');
+
 const { createCandidateTable, getCandidatesByConstituency } = require('./models/Candidate');
+const { createObserverTable, findObserverByUsername, createObserver } = require('./models/Observer');
+const { createVoteTable, castVote, getTurnoutStats, getPublicLedger } = require('./models/Vote');
 
 // Initialize Databases
 checkMysqlConnection().then(() => {
     createVoterTable();
     createLogTable();
     createCandidateTable();
+    createObserverTable().then(() => {
+        // Seed a default observer
+        createObserver('observer1', 'securepass', 'Election Observer One');
+    });
 });
 
 // Routes
@@ -90,6 +97,34 @@ app.post('/api/login', async (req, res) => {
     }
 
     res.json({ success: true });
+});
+
+// Observer Login
+app.post('/api/observer/login', async (req, res) => {
+    const { username, password } = req.body;
+    try {
+        const observer = await findObserverByUsername(username);
+        if (!observer) {
+            return res.status(401).json({ error: 'Invalid credentials' });
+        }
+
+        // Simple password check for demo (use bcrypt in production)
+        if (observer.password !== password) {
+            return res.status(401).json({ error: 'Invalid credentials' });
+        }
+
+        res.json({
+            success: true,
+            observer: {
+                id: observer.id,
+                username: observer.username,
+                full_name: observer.full_name
+            }
+        });
+    } catch (err) {
+        console.error(err);
+        res.status(500).json({ error: 'Login failed' });
+    }
 });
 
 // Example route calling Python AI module
