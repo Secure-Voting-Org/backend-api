@@ -11,12 +11,12 @@ const createVoterTable = async () => {
         has_voted BOOLEAN DEFAULT FALSE,
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
     )`;
-    await mysqlPool.query(query);
+    await mysqlPool.execute(query);
 };
 
 // Find Voter by ID
 const findVoterById = async (voterId) => {
-    const [rows] = await mysqlPool.query('SELECT * FROM voters WHERE id = ?', [voterId]);
+    const [rows] = await mysqlPool.execute('SELECT * FROM voters WHERE id = ?', [voterId]);
     return rows[0];
 };
 
@@ -24,13 +24,13 @@ const findVoterById = async (voterId) => {
 const createVoter = async (voter) => {
     const { id, name, constituency, face_descriptor } = voter;
     const query = 'INSERT INTO voters (id, name, constituency, face_descriptor) VALUES (?, ?, ?, ?)';
-    await mysqlPool.query(query, [id, name, constituency, JSON.stringify(face_descriptor)]);
+    await mysqlPool.execute(query, [id, name, constituency, JSON.stringify(face_descriptor)]);
 };
 
 // Update Voter Face Descriptor
 const updateVoterFace = async (voterId, faceDescriptor) => {
     const query = 'UPDATE voters SET face_descriptor = ? WHERE id = ?';
-    await mysqlPool.query(query, [JSON.stringify(faceDescriptor), voterId]);
+    await mysqlPool.execute(query, [JSON.stringify(faceDescriptor), voterId]);
 };
 
 module.exports = { createVoterTable, findVoterById, createVoter, updateVoterFace };
