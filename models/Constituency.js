@@ -1,30 +1,30 @@
-const { mysqlPool } = require('../config/db');
+const { pool } = require('../config/db');
 
 // Create Constituency Table
 const createConstituencyTable = async () => {
     const query = `
     CREATE TABLE IF NOT EXISTS constituencies (
-        id INT AUTO_INCREMENT PRIMARY KEY,
+        id SERIAL PRIMARY KEY,
         name VARCHAR(100) NOT NULL UNIQUE,
         district VARCHAR(100),
         voter_count INT DEFAULT 0
     )`;
-    await mysqlPool.execute(query);
+    await pool.query(query);
     console.log("Constituency table checked/created.");
 };
 
 // Add Constituency
 const addConstituency = async (name, district) => {
-    const [result] = await mysqlPool.execute(
-        'INSERT INTO constituencies (name, district) VALUES (?, ?)',
+    const { rows } = await pool.query(
+        'INSERT INTO constituencies (name, district) VALUES ($1, $2) RETURNING id',
         [name, district]
     );
-    return result.insertId;
+    return rows[0].id;
 };
 
 // Get All Constituencies
 const getAllConstituencies = async () => {
-    const [rows] = await mysqlPool.execute('SELECT * FROM constituencies');
+    const { rows } = await pool.query('SELECT * FROM constituencies');
     return rows;
 };
 

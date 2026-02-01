@@ -1,10 +1,10 @@
-const { mysqlPool } = require('../config/db');
+const { pool } = require('../config/db');
 
 // Create Candidates Table
 const createCandidateTable = async () => {
     const query = `
     CREATE TABLE IF NOT EXISTS candidates (
-        id INT AUTO_INCREMENT PRIMARY KEY,
+        id SERIAL PRIMARY KEY,
         name VARCHAR(100) NOT NULL,
         party VARCHAR(100),
         constituency VARCHAR(100) NOT NULL,
@@ -12,13 +12,13 @@ const createCandidateTable = async () => {
         photo_url VARCHAR(255),
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
     )`;
-    await mysqlPool.query(query);
+    await pool.query(query);
 };
 
 // Seed Candidates
 const seedCandidates = async () => {
     // Clear existing data to avoid duplicates for this demo
-    await mysqlPool.query('TRUNCATE TABLE candidates');
+    await pool.query('TRUNCATE TABLE candidates RESTART IDENTITY');
 
     const candidates = [
         // Kuppam
@@ -47,25 +47,29 @@ const seedCandidates = async () => {
         { name: "B. A. Samad Shaheen", party: "Indian National Congress (INC)", symbol: "✋", constituency: "Hindupur" }
     ];
 
-    const query = 'INSERT INTO candidates (name, party, symbol, constituency) VALUES ?';
-    const values = candidates.map(c => [c.name, c.party, c.symbol, c.constituency]);
+    // Bulk Insert Construction for Postgres
+    // Postgres doesn't support 'VALUES ?' like mysql2. We need labeled parameters.
+    const values = candidates.flatMap(c => [c.name, c.party, c.symbol, c.constituency]);
+    const placeholders = candidates.map((_, i) => `($${i * 4 + 1}, $${i * 4 + 2}, $${i * 4 + 3}, $${i * 4 + 4})`).join(', ');
 
-    await mysqlPool.query(query, [values]);
+    const query = `INSERT INTO candidates (name, party, symbol, constituency) VALUES ${placeholders}`;
+
+    await pool.query(query, values);
     console.log("Seeding completed.");
 };
 
 // Get Candidates by Constituency
 const getCandidatesByConstituency = async (constituency) => {
-    const query = 'SELECT * FROM candidates WHERE constituency = ?';
-    const [rows] = await mysqlPool.query(query, [constituency]);
+    const query = 'SELECT * FROM candidates WHERE constituency = $1';
+    const { rows } = await pool.query(query, [constituency]);
     return rows;
 };
 
 // Create Candidate (for manual addition)
 const createCandidate = async (candidate) => {
     const { name, party, constituency, symbol, photo_url } = candidate;
-    const query = 'INSERT INTO candidates (name, party, constituency, symbol, photo_url) VALUES (?, ?, ?, ?, ?)';
-    await mysqlPool.query(query, [name, party, constituency, symbol, photo_url]);
+    const query = 'INSERT INTO candidates (name, party, constituency, symbol, photo_url) VALUES ($1, $2, $3, $4, $5)';
+    await pool.query(query, [name, party, constituency, symbol, photo_url]);
 };
 
 module.exports = { createCandidateTable, getCandidatesByConstituency, createCandidate, seedCandidates };

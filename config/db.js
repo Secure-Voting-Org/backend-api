@@ -1,29 +1,35 @@
-const mysql = require('mysql2/promise');
+const { Pool } = require('pg');
 require('dotenv').config();
 
-// MySQL Connection Pool
-const mysqlPool = mysql.createPool({
-    host: process.env.DB_HOST,
+// PostgreSQL Connection Pool
+const pool = new Pool({
     user: process.env.DB_USER,
-    password: process.env.DB_PASSWORD,
+    host: process.env.DB_HOST,
     database: process.env.DB_NAME,
-    waitForConnections: true,
-    connectionLimit: 10,
-    queueLimit: 0
+    password: process.env.DB_PASSWORD,
+    port: process.env.DB_PORT || 5432,
 });
 
-// Check MySQL Connection
-const checkMysqlConnection = async () => {
+// Check PostgreSQL Connection
+const checkDbConnection = async () => {
     try {
-        const connection = await mysqlPool.getConnection();
-        console.log('MySQL Connected Successfully');
-        connection.release();
+        const client = await pool.connect();
+        console.log('PostgreSQL Connected Successfully');
+        client.release();
     } catch (err) {
-        console.error('MySQL Connection Error:', err);
+        console.error('PostgreSQL Connection Error:', err);
     }
 };
 
+// Export as mysqlPool to maintain backward compatibility with existing code imports,
+// or we can update imports. Let's update imports in next steps but keep the export name clear.
+// Actually, it is better to export 'pool' generally, but if I want to minimize churn I could alias it,
+// but the methods are different (execute vs query). PG uses query() mostly. 
+// MySQL2 uses execute(). I will export 'pool' and alias it as 'mysqlPool' to prevent import errors 
+// strictly for the variable name, but I MUST update the method calls anyway.
+// So I will just export 'pool'.
+
 module.exports = {
-    mysqlPool,
-    checkMysqlConnection
+    pool,
+    checkDbConnection
 };

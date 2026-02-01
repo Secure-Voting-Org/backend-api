@@ -1,14 +1,14 @@
-const { checkMysqlConnection } = require('./config/db');
+const { checkDbConnection } = require('./config/db');
 const { createCandidateTable, seedCandidates } = require('./models/Candidate');
-const { mysqlPool } = require('./config/db');
+const { pool } = require('./config/db');
 
 const runSeed = async () => {
     try {
-        await checkMysqlConnection();
+        await checkDbConnection();
         console.log("Connected to DB.");
 
         // Drop table to ensure schema update (adding symbol column)
-        await mysqlPool.query('DROP TABLE IF EXISTS candidates');
+        await pool.query('DROP TABLE IF EXISTS candidates');
         console.log("Dropped old candidates table.");
 
         await createCandidateTable();

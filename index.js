@@ -9,7 +9,7 @@ const PORT = process.env.PORT || 5000;
 app.use(cors());
 app.use(express.json());
 
-const { checkMysqlConnection } = require('./config/db');
+const { checkDbConnection } = require('./config/db');
 const { createVoterTable, findVoterById, updateVoterFace, createVoter } = require('./models/Voter');
 const { createLogTable, createLog } = require('./models/Log');
 
@@ -23,7 +23,7 @@ const { createElectionTable, getElectionStatus, updateElectionPhase, toggleKillS
 const { createConstituencyTable, addConstituency, getAllConstituencies } = require('./models/Constituency');
 
 // Initialize Databases
-checkMysqlConnection().then(async () => {
+checkDbConnection().then(async () => {
     try {
         await createVoterTable();
         await createLogTable();
@@ -43,7 +43,7 @@ checkMysqlConnection().then(async () => {
         console.error("FATAL ERROR during Database Initialization:", err);
     }
 }).catch(err => {
-    console.error("Failed to connect to MySQL during init:", err);
+    console.error("Failed to connect to Database during init:", err);
 });
 
 // Routes

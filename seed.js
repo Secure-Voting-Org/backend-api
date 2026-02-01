@@ -1,9 +1,9 @@
 const { createVoter, createVoterTable } = require('./models/Voter');
-const { checkMysqlConnection, mysqlPool } = require('./config/db');
+const { checkDbConnection } = require('./config/db');
 
 const seedData = async () => {
     try {
-        await checkMysqlConnection();
+        await checkDbConnection();
         await createVoterTable();
 
         // Sample Face Descriptor (Mock 128-float array)

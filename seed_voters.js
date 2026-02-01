@@ -1,17 +1,17 @@
-const { checkMysqlConnection } = require('./config/db');
+const { checkDbConnection } = require('./config/db');
 const { createVoterTable, createVoter } = require('./models/Voter');
-const { mysqlPool } = require('./config/db');
+const { pool } = require('./config/db');
 
 // Dummy Face Descriptor (128-float array filled with 0.1)
 const DUMMY_DESCRIPTOR = Array(128).fill(0.1);
 
 const seedVoters = async () => {
     try {
-        await checkMysqlConnection();
+        await checkDbConnection();
         console.log("Connected to DB.");
 
         // Clear existing voters
-        await mysqlPool.query('TRUNCATE TABLE voters');
+        await pool.query('TRUNCATE TABLE voters RESTART IDENTITY');
         console.log("Cleared old voters.");
 
         // Create table just in case
