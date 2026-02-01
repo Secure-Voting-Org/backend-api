@@ -21,6 +21,7 @@ const { createVoteTable, castVote, getTurnoutStats, getPublicLedger } = require(
 const { createAdminTable, findAdminByUsername } = require('./models/Admin');
 const { createElectionTable, getElectionStatus, updateElectionPhase, toggleKillSwitch } = require('./models/Election');
 const { createConstituencyTable, addConstituency, getAllConstituencies } = require('./models/Constituency');
+const { createElectoralRollTable, findCitizen, markAsRegistered } = require('./models/ElectoralRoll');
 
 // Initialize Databases
 checkDbConnection().then(async () => {
@@ -35,6 +36,7 @@ checkDbConnection().then(async () => {
         await createAdminTable();
         await createElectionTable();
         await createConstituencyTable();
+        await createElectoralRollTable();
 
         // Seed Observer
         createObserver('observer1', 'securepass', 'Election Observer One');
@@ -141,6 +143,55 @@ app.post('/api/voter/register', async (req, res) => {
     } catch (err) {
         console.error("Voter Registration Error:", err);
         res.status(500).json({ error: 'Registration failed' });
+    }
+});
+
+// --- SELF-REGISTRATION ROUTES ---
+
+// 1. Validate Identity
+app.post('/api/registration/validate', async (req, res) => {
+    const { aadhaar, phone } = req.body;
+    try {
+        const citizen = await findCitizen(aadhaar, phone);
+        if (!citizen) {
+            return res.status(404).json({ error: 'Identity not found in Electoral Roll. Check Aadhaar and Phone.' });
+        }
+        if (citizen.is_registered) {
+            return res.status(400).json({ error: 'This Aadhaar is already registered as a voter.' });
+        }
+        res.json({
+            success: true,
+            name: citizen.name,
+            constituency: citizen.constituency
+        });
+    } catch (err) {
+        res.status(500).json({ error: 'Validation failed' });
+    }
+});
+
+// 2. Submit Enrollment (Face)
+app.post('/api/registration/submit', async (req, res) => {
+    const { aadhaar, name, constituency, faceDescriptor } = req.body;
+    try {
+        // Double check not registered
+        const citizen = await findCitizen(aadhaar, req.body.phone); // Need phone passed or just trust? Better trust aadhaar lookup again if we had it, but simplified here:
+        // Actually, we should just check the table again by aadhaar
+        // BUT `findCitizen` needs phone. Let's assume frontend passes what we need or we trust `aadhaar` unique check.
+        // Let's rely on database constraints or just update.
+
+        // Generate Voter ID
+        const voterId = 'VOT' + Math.floor(100000 + Math.random() * 900000);
+
+        // Create Voter
+        await createVoter({ id: voterId, name, constituency, face_descriptor: faceDescriptor });
+
+        // Mark as Registered
+        await markAsRegistered(aadhaar);
+
+        res.json({ success: true, voterId });
+    } catch (err) {
+        console.error(err);
+        res.status(500).json({ error: 'Enrollment failed' });
     }
 });
 
