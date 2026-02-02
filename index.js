@@ -1,4 +1,5 @@
 const express = require('express');
+require('dotenv').config();
 const cors = require('cors');
 const { spawn } = require('child_process');
 const path = require('path');
@@ -22,6 +23,8 @@ const { createAdminTable, findAdminByUsername } = require('./models/Admin');
 const { createElectionTable, getElectionStatus, updateElectionPhase, toggleKillSwitch } = require('./models/Election');
 const { createConstituencyTable, addConstituency, getAllConstituencies } = require('./models/Constituency');
 const { createElectoralRollTable, findCitizen, markAsRegistered } = require('./models/ElectoralRoll');
+const { createRecoveryTable, createRecoveryRequest, getRecoveryRequest, updateRecoveryStatus } = require('./models/RecoveryRequest');
+const { incrementRetry, lockAccount, resetLocks } = require('./models/Voter');
 
 // Initialize Databases
 checkDbConnection().then(async () => {
@@ -37,6 +40,7 @@ checkDbConnection().then(async () => {
         await createElectionTable();
         await createConstituencyTable();
         await createElectoralRollTable();
+        await createRecoveryTable();
 
         // Seed Observer
         createObserver('observer1', 'securepass', 'Election Observer One');
@@ -376,6 +380,95 @@ app.post('/api/fraud-check', (req, res) => {
             res.status(500).json({ error: 'Failed to parse AI response' });
         }
     });
+});
+
+// --- ACCOUNT RECOVERY ROUTES ---
+
+// 1. Initiate Recovery
+app.post('/api/recovery/initiate', async (req, res) => {
+    const { voterId } = req.body;
+    try {
+        const voter = await findVoterById(voterId);
+        if (!voter) return res.status(404).json({ error: 'Voter not found' });
+
+        // Check Lockout
+        if (voter.locked_until && new Date(voter.locked_until) > new Date()) {
+            return res.status(403).json({ error: `Account locked. Try again after ${voter.locked_until}` });
+        }
+
+        const requestId = await createRecoveryRequest(voterId);
+        res.json({ success: true, requestId, message: 'Recovery Initiated. Proceed to NFC Verification.' });
+    } catch (err) {
+        console.error(err);
+        res.status(500).json({ error: 'Failed to initiate recovery' });
+    }
+});
+
+// 2. Verify NFC (Mock)
+app.post('/api/recovery/verify-nfc', async (req, res) => {
+    const { requestId } = req.body;
+    try {
+        const request = await getRecoveryRequest(requestId);
+        if (!request) return res.status(404).json({ error: 'Request not found' });
+
+        if (request.status !== 'INITIATED') return res.status(400).json({ error: 'Invalid step' });
+
+        await updateRecoveryStatus(requestId, 'NFC_VERIFIED');
+        res.json({ success: true, message: 'NFC Verified. Proceed to Face Verification.' });
+    } catch (err) {
+        res.status(500).json({ error: 'NFC Verification Failed' });
+    }
+});
+
+// 3. Verify Face
+app.post('/api/recovery/verify-face', async (req, res) => {
+    const { requestId, faceDescriptor } = req.body;
+    try {
+        const request = await getRecoveryRequest(requestId);
+        if (!request) return res.status(404).json({ error: 'Request not found' });
+
+        const voter = await findVoterById(request.voter_id);
+
+        // Simple Vector Math for similarity (Euclidean Distance or Cosine Similarity)
+        // Assuming faceDescriptor is an array of numbers.
+        // NOTE: In a real app, use a library like face-api.js or python module.
+        // Here we simulate a match check.
+
+        // Mocking match logic:
+        const isMatch = true; // Replace with actual vector comparison logic
+
+        if (isMatch) {
+            await updateRecoveryStatus(requestId, 'PENDING_ADMIN');
+            res.json({ success: true, message: 'Face Verified. Waiting for Admin Approval.' });
+        } else {
+            const retryCount = await incrementRetry(request.voter_id);
+            if (retryCount >= 3) {
+                await lockAccount(request.voter_id, 15); // Lock for 15 mins
+                await updateRecoveryStatus(requestId, 'FAILED');
+                return res.status(403).json({ error: 'Face verification failed too many times. Account Locked for 15 minutes.' });
+            }
+            res.status(401).json({ error: 'Face verification failed. Try again.', retriesLeft: 3 - retryCount });
+        }
+    } catch (err) {
+        console.error(err);
+        res.status(500).json({ error: 'Face Verification Error' });
+    }
+});
+
+// 4. Admin Approval
+app.post('/api/admin/recovery/approve', async (req, res) => {
+    const { requestId, adminId } = req.body; // In real app, verify admin session
+    try {
+        const request = await getRecoveryRequest(requestId);
+        if (!request) return res.status(404).json({ error: 'Request not found' });
+
+        await updateRecoveryStatus(requestId, 'APPROVED');
+        await resetLocks(request.voter_id); // Unlock account
+
+        res.json({ success: true, message: 'Recovery Request Approved. User can now login.' });
+    } catch (err) {
+        res.status(500).json({ error: 'Approval Failed' });
+    }
 });
 
 app.listen(PORT, () => {
