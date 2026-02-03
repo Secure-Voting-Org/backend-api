@@ -14,7 +14,7 @@ const { checkDbConnection } = require('./config/db');
 const { createVoterTable, createRegistrationTable, findVoterById, updateVoterFace, createVoter, saveRegistrationDetails } = require('./models/Voter');
 const { createLogTable, createLog } = require('./models/Log');
 
-const { createCandidateTable, getCandidatesByConstituency, addCandidate } = require('./models/Candidate');
+const { createCandidateTable, getCandidatesByConstituency, getCandidatesByMetadata, addCandidate } = require('./models/Candidate');
 const { createObserverTable, findObserverByUsername, createObserver } = require('./models/Observer');
 const { createVoteTable, castVote, getTurnoutStats, getPublicLedger } = require('./models/Vote');
 
@@ -251,6 +251,46 @@ app.get('/api/candidates', async (req, res) => {
     } catch (err) {
         console.error(err);
         res.status(500).json({ error: 'Failed to fetch candidates' });
+    }
+});
+
+// Search Candidates by Metadata (District, Constituency)
+app.get('/api/candidates/search', async (req, res) => {
+    const { district, constituency } = req.query;
+    try {
+        const candidates = await getCandidatesByMetadata({ district, constituency });
+        res.json(candidates);
+    } catch (err) {
+        console.error(err);
+        res.status(500).json({ error: 'Failed to search candidates' });
+    }
+});
+
+/**
+ * FEATURE 2.1.1.1: Define API endpoints to retrieve candidate lists based on user metadata.
+ * GET /api/voter/ballot/:voterId
+ * Retrieves candidates based on the voter's stored constituency.
+ */
+app.get('/api/voter/ballot/:voterId', async (req, res) => {
+    const { voterId } = req.params;
+    try {
+        const voter = await findVoterById(voterId);
+        if (!voter) {
+            return res.status(404).json({ error: 'Voter not found' });
+        }
+
+        if (!voter.constituency) {
+            return res.status(400).json({ error: 'Voter profile is missing constituency metadata' });
+        }
+
+        const candidates = await getCandidatesByConstituency(voter.constituency);
+        res.json({
+            constituency: voter.constituency,
+            candidates: candidates
+        });
+    } catch (err) {
+        console.error("Ballot Retrieval Error:", err);
+        res.status(500).json({ error: 'Failed to retrieve local ballot' });
     }
 });
 

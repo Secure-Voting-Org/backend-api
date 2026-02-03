@@ -65,6 +65,32 @@ const getCandidatesByConstituency = async (constituency) => {
     return rows;
 };
 
+// Get Candidates by Metadata (Constituency, District)
+const getCandidatesByMetadata = async (metadata) => {
+    const { constituency, district } = metadata;
+    let query = 'SELECT c.* FROM candidates c';
+    let params = [];
+    let conditions = [];
+
+    if (constituency) {
+        params.push(constituency);
+        conditions.push(`c.constituency = $${params.length}`);
+    }
+
+    if (district) {
+        query += ' JOIN constituencies co ON c.constituency = co.name';
+        params.push(district);
+        conditions.push(`co.district = $${params.length}`);
+    }
+
+    if (conditions.length > 0) {
+        query += ' WHERE ' + conditions.join(' AND ');
+    }
+
+    const { rows } = await pool.query(query, params);
+    return rows;
+};
+
 // Create Candidate (for manual addition)
 const createCandidate = async (candidate) => {
     const { name, party, constituency, symbol, photo_url } = candidate;
@@ -72,4 +98,4 @@ const createCandidate = async (candidate) => {
     await pool.query(query, [name, party, constituency, symbol, photo_url]);
 };
 
-module.exports = { createCandidateTable, getCandidatesByConstituency, createCandidate, seedCandidates };
+module.exports = { createCandidateTable, getCandidatesByConstituency, getCandidatesByMetadata, createCandidate, seedCandidates };
