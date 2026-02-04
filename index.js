@@ -11,7 +11,7 @@ app.use(cors());
 app.use(express.json());
 
 const { checkDbConnection } = require('./config/db');
-const { createVoterTable, findVoterById, updateVoterFace, createVoter } = require('./models/Voter');
+const { createVoterTable, createRegistrationTable, findVoterById, updateVoterFace, createVoter, saveRegistrationDetails } = require('./models/Voter');
 const { createLogTable, createLog } = require('./models/Log');
 
 const { createCandidateTable, getCandidatesByConstituency, addCandidate } = require('./models/Candidate');
@@ -30,6 +30,7 @@ const { incrementRetry, lockAccount, resetLocks } = require('./models/Voter');
 checkDbConnection().then(async () => {
     try {
         await createVoterTable();
+        await createRegistrationTable();
         await createLogTable();
         await createCandidateTable();
         await createObserverTable();
@@ -174,25 +175,27 @@ app.post('/api/registration/validate', async (req, res) => {
 });
 
 // 2. Submit Enrollment (Face)
+// 2. Submit Enrollment (Face & Full Details)
 app.post('/api/registration/submit', async (req, res) => {
-    const { aadhaar, name, constituency, faceDescriptor } = req.body;
+    const {
+        aadhaar, name, constituency, faceDescriptor,
+        state, district, mobile, email, dob, gender,
+        relativeName, relativeType, address, disability
+    } = req.body;
+
     try {
-        // Double check not registered
-        const citizen = await findCitizen(aadhaar, req.body.phone); // Need phone passed or just trust? Better trust aadhaar lookup again if we had it, but simplified here:
-        // Actually, we should just check the table again by aadhaar
-        // BUT `findCitizen` needs phone. Let's assume frontend passes what we need or we trust `aadhaar` unique check.
-        // Let's rely on database constraints or just update.
+        // 1. Submit Application (Pending Verification)
+        const applicationId = await saveRegistrationDetails({
+            aadhaar, name, relativeName, relativeType,
+            state, district, constituency, dob, gender,
+            mobile, email, address, disability, faceDescriptor
+        });
 
-        // Generate Voter ID
-        const voterId = 'VOT' + Math.floor(100000 + Math.random() * 900000);
+        // 2. Mark as Registered in Electoral Roll (OPTIONAL: Maybe wait for approval? 
+        // For now, let's keep it to prevent double submission)
+        // if (aadhaar) { await markAsRegistered(aadhaar); }
 
-        // Create Voter
-        await createVoter({ id: voterId, name, constituency, face_descriptor: faceDescriptor });
-
-        // Mark as Registered
-        await markAsRegistered(aadhaar);
-
-        res.json({ success: true, voterId });
+        res.json({ success: true, applicationId, message: 'Application Submitted for Verification' });
     } catch (err) {
         console.error(err);
         res.status(500).json({ error: 'Enrollment failed' });
