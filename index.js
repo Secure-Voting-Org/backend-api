@@ -11,7 +11,7 @@ app.use(cors());
 app.use(express.json({ limit: '50mb' }));
 
 const { checkDbConnection } = require('./config/db');
-const { createVoterTable, findVoterById, findVoterByReferenceId, updateVoterFace, createVoter } = require('./models/Voter');
+const { createVoterTable, createRegistrationTable, findVoterById, updateVoterFace, createVoter, saveRegistrationDetails } = require('./models/Voter');
 const { createLogTable, createLog } = require('./models/Log');
 
 const { createCandidateTable, getCandidatesByConstituency, addCandidate } = require('./models/Candidate');
@@ -30,6 +30,7 @@ const { incrementRetry, lockAccount, resetLocks } = require('./models/Voter');
 checkDbConnection().then(async () => {
     try {
         await createVoterTable();
+        await createRegistrationTable();
         await createLogTable();
         await createCandidateTable();
         await createObserverTable();
@@ -174,54 +175,27 @@ app.post('/api/registration/validate', async (req, res) => {
 });
 
 // 2. Submit Enrollment (Face)
+// 2. Submit Enrollment (Face & Full Details)
 app.post('/api/registration/submit', async (req, res) => {
     const {
-        aadhaar, formData, faceDescriptor
+        aadhaar, name, constituency, faceDescriptor,
+        state, district, mobile, email, dob, gender,
+        relativeName, relativeType, address, disability
     } = req.body;
 
     try {
-        // Generate Voter ID & Reference ID
-        const voterId = 'VOT' + Math.floor(100000 + Math.random() * 900000);
-        const referenceId = 'REF' + Math.floor(10000000 + Math.random() * 90000000);
+        // 1. Submit Application (Pending Verification)
+        const applicationId = await saveRegistrationDetails({
+            aadhaar, name, relativeName, relativeType,
+            state, district, constituency, dob, gender,
+            mobile, email, address, disability, faceDescriptor
+        });
 
-        // Map formData keys to DB columns
-        const voterData = {
-            id: voterId,
-            reference_id: referenceId,
-            name: `${formData.firstName} ${formData.surname}`,
-            surname: formData.surname, // keeping both full name and surname if needed
-            gender: formData.gender,
-            dob: `${formData.dobDay}/${formData.dobMonth}/${formData.dobYear}`,
-            constituency: formData.assemblyConstituency,
-            face_descriptor: faceDescriptor,
+        // 2. Mark as Registered in Electoral Roll (OPTIONAL: Maybe wait for approval? 
+        // For now, let's keep it to prevent double submission)
+        // if (aadhaar) { await markAsRegistered(aadhaar); }
 
-            mobile: formData.mobileSelf ? formData.mobileNumber : formData.mobileRelativeNumber,
-            email: formData.emailSelf ? formData.email : formData.emailRelative,
-
-            address: `${formData.houseNo}, ${formData.streetArea}, ${formData.villageTown}`,
-            district: formData.district,
-            state: formData.state,
-            pincode: formData.pincode,
-
-            relative_name: `${formData.relativeName} ${formData.relativeSurname}`,
-            relative_type: formData.relationType,
-
-            disability_type: formData.disabilityOtherSpec || (formData.disabilityCategories?.locomotive ? 'Locomotive' : 'None'), // simplified logic
-
-            // Documents
-            profile_image_data: formData.image ? formData.image.base64 : null, // Fix field name 'image' and access base64
-            dob_proof_data: formData.dobProofFile ? formData.dobProofFile.base64 : null,
-            address_proof_data: formData.addressProofFile ? formData.addressProofFile.base64 : null,
-            disability_proof_data: formData.disabilityFile ? formData.disabilityFile.base64 : null
-        };
-
-        // Create Voter with Full Details
-        await createVoter(voterData);
-
-        // Mark as Registered in Electoral Roll (Optional based on workflow)
-        // await markAsRegistered(aadhaar); // Uncomment if strict Aadhaar check applies
-
-        res.json({ success: true, voterId, referenceId });
+        res.json({ success: true, applicationId, message: 'Application Submitted for Verification' });
     } catch (err) {
         console.error(err);
         res.status(500).json({ error: 'Enrollment failed' });
