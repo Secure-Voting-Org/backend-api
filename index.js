@@ -23,7 +23,7 @@ const { createAdminTable, findAdminByUsername } = require('./models/Admin');
 const { createElectionTable, getElectionStatus, updateElectionPhase, toggleKillSwitch } = require('./models/Election');
 const { createConstituencyTable, addConstituency, getAllConstituencies } = require('./models/Constituency');
 const { createElectoralRollTable, findCitizen, markAsRegistered } = require('./models/ElectoralRoll');
-const { createRecoveryTable, createRecoveryRequest, getRecoveryRequest, updateRecoveryStatus } = require('./models/RecoveryRequest');
+const { createRecoveryTable, createRecoveryRequest, getRecoveryRequest, updateRecoveryStatus, getAllRecoveryRequests } = require('./models/RecoveryRequest');
 const { incrementRetry, lockAccount, resetLocks } = require('./models/Voter');
 
 // Initialize Databases
@@ -482,6 +482,16 @@ app.post('/api/recovery/verify-face', async (req, res) => {
     }
 });
 
+// 3.5 Get All Pending (Admin)
+app.get('/api/admin/recovery/pending', async (req, res) => {
+    try {
+        const requests = await getAllRecoveryRequests();
+        res.json(requests);
+    } catch (err) {
+        res.status(500).json({ error: 'Failed to fetch requests' });
+    }
+});
+
 // 4. Admin Approval
 app.post('/api/admin/recovery/approve', async (req, res) => {
     const { requestId, adminId } = req.body; // In real app, verify admin session
@@ -489,7 +499,7 @@ app.post('/api/admin/recovery/approve', async (req, res) => {
         const request = await getRecoveryRequest(requestId);
         if (!request) return res.status(404).json({ error: 'Request not found' });
 
-        await updateRecoveryStatus(requestId, 'APPROVED');
+        await updateRecoveryStatus(requestId, 'APPROVED', adminId);
         await resetLocks(request.voter_id); // Unlock account
 
         res.json({ success: true, message: 'Recovery Request Approved. User can now login.' });
