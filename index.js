@@ -8,10 +8,10 @@ const app = express();
 const PORT = process.env.PORT || 5000;
 
 app.use(cors());
-app.use(express.json());
+app.use(express.json({ limit: '50mb' }));
 
 const { checkDbConnection } = require('./config/db');
-const { createVoterTable, findVoterById, updateVoterFace, createVoter } = require('./models/Voter');
+const { createVoterTable, findVoterById, findVoterByReferenceId, updateVoterFace, createVoter } = require('./models/Voter');
 const { createLogTable, createLog } = require('./models/Log');
 
 const { createCandidateTable, getCandidatesByConstituency, addCandidate } = require('./models/Candidate');
@@ -175,27 +175,80 @@ app.post('/api/registration/validate', async (req, res) => {
 
 // 2. Submit Enrollment (Face)
 app.post('/api/registration/submit', async (req, res) => {
-    const { aadhaar, name, constituency, faceDescriptor } = req.body;
+    const {
+        aadhaar, formData, faceDescriptor
+    } = req.body;
+
     try {
-        // Double check not registered
-        const citizen = await findCitizen(aadhaar, req.body.phone); // Need phone passed or just trust? Better trust aadhaar lookup again if we had it, but simplified here:
-        // Actually, we should just check the table again by aadhaar
-        // BUT `findCitizen` needs phone. Let's assume frontend passes what we need or we trust `aadhaar` unique check.
-        // Let's rely on database constraints or just update.
-
-        // Generate Voter ID
+        // Generate Voter ID & Reference ID
         const voterId = 'VOT' + Math.floor(100000 + Math.random() * 900000);
+        const referenceId = 'REF' + Math.floor(10000000 + Math.random() * 90000000);
 
-        // Create Voter
-        await createVoter({ id: voterId, name, constituency, face_descriptor: faceDescriptor });
+        // Map formData keys to DB columns
+        const voterData = {
+            id: voterId,
+            reference_id: referenceId,
+            name: `${formData.firstName} ${formData.surname}`,
+            surname: formData.surname, // keeping both full name and surname if needed
+            gender: formData.gender,
+            dob: `${formData.dobDay}/${formData.dobMonth}/${formData.dobYear}`,
+            constituency: formData.assemblyConstituency,
+            face_descriptor: faceDescriptor,
 
-        // Mark as Registered
-        await markAsRegistered(aadhaar);
+            mobile: formData.mobileSelf ? formData.mobileNumber : formData.mobileRelativeNumber,
+            email: formData.emailSelf ? formData.email : formData.emailRelative,
 
-        res.json({ success: true, voterId });
+            address: `${formData.houseNo}, ${formData.streetArea}, ${formData.villageTown}`,
+            district: formData.district,
+            state: formData.state,
+            pincode: formData.pincode,
+
+            relative_name: `${formData.relativeName} ${formData.relativeSurname}`,
+            relative_type: formData.relationType,
+
+            disability_type: formData.disabilityOtherSpec || (formData.disabilityCategories?.locomotive ? 'Locomotive' : 'None'), // simplified logic
+
+            // Documents
+            profile_image_data: formData.image ? formData.image.base64 : null, // Fix field name 'image' and access base64
+            dob_proof_data: formData.dobProofFile ? formData.dobProofFile.base64 : null,
+            address_proof_data: formData.addressProofFile ? formData.addressProofFile.base64 : null,
+            disability_proof_data: formData.disabilityFile ? formData.disabilityFile.base64 : null
+        };
+
+        // Create Voter with Full Details
+        await createVoter(voterData);
+
+        // Mark as Registered in Electoral Roll (Optional based on workflow)
+        // await markAsRegistered(aadhaar); // Uncomment if strict Aadhaar check applies
+
+        res.json({ success: true, voterId, referenceId });
     } catch (err) {
         console.error(err);
         res.status(500).json({ error: 'Enrollment failed' });
+    }
+});
+
+// 3. Application Status Check
+app.get('/api/application/status/:referenceId', async (req, res) => {
+    const { referenceId } = req.params;
+    try {
+        const { findVoterByReferenceId } = require('./models/Voter'); // lazy import or move top
+        const voter = await findVoterByReferenceId(referenceId);
+
+        if (!voter) {
+            return res.status(404).json({ error: 'Application not found' });
+        }
+
+        res.json({
+            success: true,
+            status: voter.status,
+            name: voter.name,
+            constituency: voter.constituency,
+            submittedAt: voter.created_at
+        });
+    } catch (err) {
+        console.error(err);
+        res.status(500).json({ error: 'Failed to fetch status' });
     }
 });
 
