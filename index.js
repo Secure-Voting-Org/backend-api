@@ -11,7 +11,7 @@ app.use(cors());
 app.use(express.json({ limit: '50mb' }));
 
 const { checkDbConnection } = require('./config/db');
-const { createVoterTable, findVoterById, findVoterByReferenceId, updateVoterFace, createVoter } = require('./models/Voter');
+const { createVoterTable, createRegistrationTable, findVoterById, updateVoterFace, createVoter, saveRegistrationDetails } = require('./models/Voter');
 const { createLogTable, createLog } = require('./models/Log');
 
 const { createCandidateTable, getCandidatesByConstituency, addCandidate } = require('./models/Candidate');
@@ -30,6 +30,7 @@ const { incrementRetry, lockAccount, resetLocks } = require('./models/Voter');
 checkDbConnection().then(async () => {
     try {
         await createVoterTable();
+        await createRegistrationTable();
         await createLogTable();
         await createCandidateTable();
         await createObserverTable();
@@ -174,6 +175,7 @@ app.post('/api/registration/validate', async (req, res) => {
 });
 
 // 2. Submit Enrollment (Face)
+// 2. Submit Enrollment (Face & Full Details)
 app.post('/api/registration/submit', async (req, res) => {
     const {
         aadhaar, formData, faceDescriptor
