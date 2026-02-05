@@ -182,4 +182,4 @@ const updateVoterFace = async (voterId, faceDescriptor) => {
     await pool.query(query, [JSON.stringify(faceDescriptor), voterId]);
 };
 
-module.exports = { createVoterTable, findVoterById, findVoterByReferenceId, createVoter, updateVoterFace, incrementRetry, lockAccount, resetLocks };
+module.exports = { createVoterTable, createRegistrationTable, findVoterById, findVoterByReferenceId, createVoter, saveRegistrationDetails, updateVoterFace, incrementRetry, lockAccount, resetLocks };
