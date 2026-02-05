@@ -12,7 +12,7 @@ app.use(express.json({ limit: '50mb' }));
 
 const { checkDbConnection } = require('./config/db');
 const { createVoterTable, createRegistrationTable, findVoterById, updateVoterFace, createVoter, saveRegistrationDetails } = require('./models/Voter');
-const { createLogTable, createLog } = require('./models/Log');
+const { createLogTable, createLog, getAllLogs } = require('./models/Log');
 
 const { createCandidateTable, getCandidatesByConstituency, addCandidate } = require('./models/Candidate');
 const { createObserverTable, findObserverByUsername, createObserver } = require('./models/Observer');
@@ -65,12 +65,24 @@ app.post('/api/admin/login', async (req, res) => {
     const { username, password, role } = req.body;
     try {
         const admin = await findAdminByUsername(username);
-        if (!admin) return res.status(401).json({ error: 'Invalid credentials' });
+        if (!admin) {
+            await createLog({ event: 'ADMIN_LOGIN_FAILED', user_id: username, details: { reason: 'User not found' }, ip_address: req.ip });
+            return res.status(401).json({ error: 'Invalid credentials' });
+        }
 
-        if (admin.password !== password) return res.status(401).json({ error: 'Invalid credentials' });
+        if (admin.password !== password) {
+            await createLog({ event: 'ADMIN_LOGIN_FAILED', user_id: username, details: { reason: 'Wrong password' }, ip_address: req.ip });
+            return res.status(401).json({ error: 'Invalid credentials' });
+        }
 
         // Strict Role Check
-        if (admin.role !== role) return res.status(403).json({ error: `Access Denied: You are not authorized for ${role} role.` });
+        if (admin.role !== role) {
+            await createLog({ event: 'ADMIN_LOGIN_FAILED', user_id: username, details: { reason: 'Unauthorized role', attemptedRole: role, actualRole: admin.role }, ip_address: req.ip });
+            return res.status(403).json({ error: `Access Denied: You are not authorized for ${role} role.` });
+        }
+
+        // Log successful admin login
+        await createLog({ event: 'ADMIN_LOGIN', user_id: admin.username, details: { role: admin.role }, ip_address: req.ip });
 
         res.json({ success: true, admin: { id: admin.id, username: admin.username, role: admin.role, name: admin.full_name } });
     } catch (err) {
@@ -260,8 +272,13 @@ app.post('/api/verify-voter', async (req, res) => {
     try {
         const voter = await findVoterById(voterId);
         if (!voter) {
+            await createLog({ event: 'VOTER_LOGIN_FAILED', user_id: voterId, details: { reason: 'Voter ID not found' }, ip_address: req.ip });
             return res.status(404).json({ error: 'Voter not found' });
         }
+
+        // Log successful voter verification
+        await createLog({ event: 'VOTER_LOGIN', user_id: voterId, details: { constituency: voter.constituency }, ip_address: req.ip });
+
         res.json({
             id: voter.id,
             name: voter.name,
@@ -312,14 +329,17 @@ app.post('/api/vote', async (req, res) => {
     // Check Election Status First
     const status = await getElectionStatus();
     if (status.phase !== 'LIVE' || status.is_kill_switch_active) {
+        await createLog({ event: 'VOTE_BLOCKED', user_id: voterId, details: { reason: 'Election not live or suspended' }, ip_address: req.ip });
         return res.status(403).json({ error: 'Election is not live or has been suspended.' });
     }
 
     try {
         const result = await castVote(voterId, candidateId, constituency);
         if (result.success) {
+            await createLog({ event: 'VOTE_CAST', user_id: voterId, details: { constituency, transactionHash: result.transactionHash }, ip_address: req.ip });
             res.json({ success: true, transactionHash: result.transactionHash });
         } else {
+            await createLog({ event: 'VOTE_FAILED', user_id: voterId, details: { reason: result.error }, ip_address: req.ip });
             res.status(400).json({ error: result.error });
         }
     } catch (err) {
@@ -333,13 +353,17 @@ app.post('/api/observer/login', async (req, res) => {
     try {
         const observer = await findObserverByUsername(username);
         if (!observer) {
+            await createLog({ event: 'OBSERVER_LOGIN_FAILED', user_id: username, details: { reason: 'User not found' }, ip_address: req.ip });
             return res.status(401).json({ error: 'Invalid credentials' });
         }
 
         // Simple password check for demo (use bcrypt in production)
         if (observer.password !== password) {
+            await createLog({ event: 'OBSERVER_LOGIN_FAILED', user_id: username, details: { reason: 'Wrong password' }, ip_address: req.ip });
             return res.status(401).json({ error: 'Invalid credentials' });
         }
+
+        await createLog({ event: 'OBSERVER_LOGIN', user_id: username, details: { name: observer.full_name }, ip_address: req.ip });
 
         res.json({
             success: true,
@@ -416,12 +440,19 @@ app.post('/api/recovery/initiate', async (req, res) => {
     const { voterId } = req.body;
     try {
         const voter = await findVoterById(voterId);
-        if (!voter) return res.status(404).json({ error: 'Voter not found' });
+        if (!voter) {
+            await createLog({ event: 'RECOVERY_LOGIN_FAILED', user_id: voterId, details: { reason: 'Voter not found' }, ip_address: req.ip });
+            return res.status(404).json({ error: 'Voter not found' });
+        }
 
         // Check Lockout
         if (voter.locked_until && new Date(voter.locked_until) > new Date()) {
+            await createLog({ event: 'RECOVERY_LOGIN_BLOCKED', user_id: voterId, details: { reason: 'Account locked', locked_until: voter.locked_until }, ip_address: req.ip });
             return res.status(403).json({ error: `Account locked. Try again after ${voter.locked_until}` });
         }
+
+        // Log successful recovery initiation (login before NFC/Face)
+        await createLog({ event: 'RECOVERY_LOGIN', user_id: voterId, details: { constituency: voter.constituency }, ip_address: req.ip });
 
         const requestId = await createRecoveryRequest(voterId);
         res.json({ success: true, requestId, message: 'Recovery Initiated. Proceed to NFC Verification.' });
@@ -441,8 +472,10 @@ app.post('/api/recovery/verify-nfc', async (req, res) => {
         if (request.status !== 'INITIATED') return res.status(400).json({ error: 'Invalid step' });
 
         await updateRecoveryStatus(requestId, 'NFC_VERIFIED');
+        await createLog({ event: 'NFC_VERIFIED', user_id: request.voter_id, details: { requestId }, ip_address: req.ip });
         res.json({ success: true, message: 'NFC Verified. Proceed to Face Verification.' });
     } catch (err) {
+        await createLog({ event: 'NFC_FAILED', user_id: requestId, details: { error: err.message }, ip_address: req.ip });
         res.status(500).json({ error: 'NFC Verification Failed' });
     }
 });
@@ -466,12 +499,15 @@ app.post('/api/recovery/verify-face', async (req, res) => {
 
         if (isMatch) {
             await updateRecoveryStatus(requestId, 'PENDING_ADMIN');
+            await createLog({ event: 'FACE_VERIFIED', user_id: request.voter_id, details: { requestId }, ip_address: req.ip });
             res.json({ success: true, message: 'Face Verified. Waiting for Admin Approval.' });
         } else {
+            await createLog({ event: 'FACE_FAILED', user_id: request.voter_id, details: { requestId }, ip_address: req.ip });
             const retryCount = await incrementRetry(request.voter_id);
             if (retryCount >= 3) {
                 await lockAccount(request.voter_id, 15); // Lock for 15 mins
                 await updateRecoveryStatus(requestId, 'FAILED');
+                await createLog({ event: 'ACCOUNT_LOCKED', user_id: request.voter_id, details: { reason: 'Too many face failures', lockDuration: 15 }, ip_address: req.ip });
                 return res.status(403).json({ error: 'Face verification failed too many times. Account Locked for 15 minutes.' });
             }
             res.status(401).json({ error: 'Face verification failed. Try again.', retriesLeft: 3 - retryCount });
@@ -502,9 +538,24 @@ app.post('/api/admin/recovery/approve', async (req, res) => {
         await updateRecoveryStatus(requestId, 'APPROVED', adminId);
         await resetLocks(request.voter_id); // Unlock account
 
+        // Log the approval action
+        await createLog({ event: 'RECOVERY_APPROVED', user_id: adminId, details: { requestId, voterId: request.voter_id }, ip_address: req.ip });
+
         res.json({ success: true, message: 'Recovery Request Approved. User can now login.' });
     } catch (err) {
         res.status(500).json({ error: 'Approval Failed' });
+    }
+});
+
+// --- AUDIT LOG ROUTES (Read-Only for Auditors) ---
+
+app.get('/api/audit/logs', async (req, res) => {
+    const { event } = req.query;
+    try {
+        const logs = await getAllLogs({ event });
+        res.json(logs);
+    } catch (err) {
+        res.status(500).json({ error: 'Failed to fetch audit logs' });
     }
 });
 
