@@ -14,7 +14,7 @@ const { checkDbConnection } = require('./config/db');
 const { createVoterTable, createRegistrationTable, findVoterById, updateVoterFace, createVoter, saveRegistrationDetails } = require('./models/Voter');
 const { createLogTable, createLog } = require('./models/Log');
 
-const { createCandidateTable, getCandidatesByConstituency, addCandidate } = require('./models/Candidate');
+const { createCandidateTable, getCandidatesByConstituency, getCandidatesByMetadata, addCandidate } = require('./models/Candidate');
 const { createObserverTable, findObserverByUsername, createObserver } = require('./models/Observer');
 const { createVoteTable, castVote, getTurnoutStats, getPublicLedger } = require('./models/Vote');
 
@@ -23,7 +23,7 @@ const { createAdminTable, findAdminByUsername } = require('./models/Admin');
 const { createElectionTable, getElectionStatus, updateElectionPhase, toggleKillSwitch } = require('./models/Election');
 const { createConstituencyTable, addConstituency, getAllConstituencies } = require('./models/Constituency');
 const { createElectoralRollTable, findCitizen, markAsRegistered } = require('./models/ElectoralRoll');
-const { createRecoveryTable, createRecoveryRequest, getRecoveryRequest, updateRecoveryStatus } = require('./models/RecoveryRequest');
+const { createRecoveryTable, createRecoveryRequest, getRecoveryRequest, updateRecoveryStatus, getAllRecoveryRequests } = require('./models/RecoveryRequest');
 const { incrementRetry, lockAccount, resetLocks } = require('./models/Voter');
 
 // Initialize Databases
@@ -282,6 +282,46 @@ app.get('/api/candidates', async (req, res) => {
     }
 });
 
+// Search Candidates by Metadata (District, Constituency)
+app.get('/api/candidates/search', async (req, res) => {
+    const { district, constituency } = req.query;
+    try {
+        const candidates = await getCandidatesByMetadata({ district, constituency });
+        res.json(candidates);
+    } catch (err) {
+        console.error(err);
+        res.status(500).json({ error: 'Failed to search candidates' });
+    }
+});
+
+/**
+ * FEATURE 2.1.1.1: Define API endpoints to retrieve candidate lists based on user metadata.
+ * GET /api/voter/ballot/:voterId
+ * Retrieves candidates based on the voter's stored constituency.
+ */
+app.get('/api/voter/ballot/:voterId', async (req, res) => {
+    const { voterId } = req.params;
+    try {
+        const voter = await findVoterById(voterId);
+        if (!voter) {
+            return res.status(404).json({ error: 'Voter not found' });
+        }
+
+        if (!voter.constituency) {
+            return res.status(400).json({ error: 'Voter profile is missing constituency metadata' });
+        }
+
+        const candidates = await getCandidatesByConstituency(voter.constituency);
+        res.json({
+            constituency: voter.constituency,
+            candidates: candidates
+        });
+    } catch (err) {
+        console.error("Ballot Retrieval Error:", err);
+        res.status(500).json({ error: 'Failed to retrieve local ballot' });
+    }
+});
+
 // Verify Voter ID
 app.post('/api/verify-voter', async (req, res) => {
     const { voterId } = req.body;
@@ -510,6 +550,16 @@ app.post('/api/recovery/verify-face', async (req, res) => {
     }
 });
 
+// 3.5 Get All Pending (Admin)
+app.get('/api/admin/recovery/pending', async (req, res) => {
+    try {
+        const requests = await getAllRecoveryRequests();
+        res.json(requests);
+    } catch (err) {
+        res.status(500).json({ error: 'Failed to fetch requests' });
+    }
+});
+
 // 4. Admin Approval
 app.post('/api/admin/recovery/approve', async (req, res) => {
     const { requestId, adminId } = req.body; // In real app, verify admin session
@@ -517,7 +567,7 @@ app.post('/api/admin/recovery/approve', async (req, res) => {
         const request = await getRecoveryRequest(requestId);
         if (!request) return res.status(404).json({ error: 'Request not found' });
 
-        await updateRecoveryStatus(requestId, 'APPROVED');
+        await updateRecoveryStatus(requestId, 'APPROVED', adminId);
         await resetLocks(request.voter_id); // Unlock account
 
         res.json({ success: true, message: 'Recovery Request Approved. User can now login.' });

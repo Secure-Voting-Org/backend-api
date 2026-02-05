@@ -27,9 +27,22 @@ const getRecoveryRequest = async (id) => {
 };
 
 // Update Status
-const updateRecoveryStatus = async (id, status) => {
-    const query = 'UPDATE recovery_requests SET status = $1, updated_at = CURRENT_TIMESTAMP WHERE id = $2';
-    await pool.query(query, [status, id]);
+const updateRecoveryStatus = async (id, status, adminId = null) => {
+    let query = 'UPDATE recovery_requests SET status = $1, updated_at = CURRENT_TIMESTAMP WHERE id = $2';
+    let params = [status, id];
+
+    if (adminId) {
+        query = 'UPDATE recovery_requests SET status = $1, approved_by = $3, updated_at = CURRENT_TIMESTAMP WHERE id = $2';
+        params = [status, id, adminId];
+    }
+    await pool.query(query, params);
 };
 
-module.exports = { createRecoveryTable, createRecoveryRequest, getRecoveryRequest, updateRecoveryStatus };
+// Get All Requests (For Admin)
+const getAllRecoveryRequests = async () => {
+    const query = 'SELECT * FROM recovery_requests ORDER BY created_at DESC';
+    const { rows } = await pool.query(query);
+    return rows;
+};
+
+module.exports = { createRecoveryTable, createRecoveryRequest, getRecoveryRequest, updateRecoveryStatus, getAllRecoveryRequests };
