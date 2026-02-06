@@ -55,6 +55,7 @@ const createRegistrationTable = async () => {
     const query = `
     CREATE TABLE IF NOT EXISTS voter_registrations (
         application_id SERIAL PRIMARY KEY,
+        reference_id VARCHAR(50) UNIQUE, -- Added Reference ID explicitly
         voter_id VARCHAR(20) REFERENCES voters(id),
         aadhaar_number VARCHAR(20),
         full_name VARCHAR(100),
@@ -78,84 +79,10 @@ const createRegistrationTable = async () => {
 
 // ... (existing functions)
 
-// Lockout Helpers
-const incrementRetry = async (voterId) => {
-    const query = 'UPDATE voters SET retry_count = retry_count + 1 WHERE id = $1 RETURNING retry_count';
-    const { rows } = await pool.query(query, [voterId]);
-    return rows[0].retry_count;
-};
-
-const lockAccount = async (voterId, durationMinutes) => {
-    // interval syntax for postgres
-    const query = `UPDATE voters SET locked_until = NOW() + interval '${durationMinutes} minutes' WHERE id = $1`;
-    await pool.query(query, [voterId]);
-};
-
-const resetLocks = async (voterId) => {
-    const query = 'UPDATE voters SET retry_count = 0, locked_until = NULL WHERE id = $1';
-    await pool.query(query, [voterId]);
-};
-
-// Find Voter by ID
-const findVoterById = async (voterId) => {
-    const { rows } = await pool.query('SELECT * FROM voters WHERE id = $1', [voterId]);
-    return rows[0];
-};
-
-// Find Voter by Reference ID
-const findVoterByReferenceId = async (refId) => {
-    const { rows } = await pool.query('SELECT * FROM voters WHERE reference_id = $1', [refId]);
-    return rows[0];
-};
-
-// Create a new voter (Full Registration)
-const createVoter = async (voter) => {
-    const {
-        id, reference_id, name, surname, gender, dob,
-        constituency, face_descriptor,
-        mobile, email,
-        address, district, state, pincode,
-        relative_name, relative_type,
-        disability_type,
-        profile_image_data, dob_proof_data, address_proof_data, disability_proof_data
-    } = voter;
-
-    const query = `
-        INSERT INTO voters (
-            id, reference_id, name, surname, gender, dob,
-            constituency, face_descriptor,
-            mobile, email,
-            address, district, state, pincode,
-            relative_name, relative_type,
-            disability_type,
-            profile_image_data, dob_proof_data, address_proof_data, disability_proof_data,
-            status
-        ) VALUES (
-            $1, $2, $3, $4, $5, $6,
-            $7, $8,
-            $9, $10,
-            $11, $12, $13, $14,
-            $15, $16,
-            $17,
-            $18, $19, $20, $21,
-            'PENDING'
-        )
-    `;
-
-    await pool.query(query, [
-        id, reference_id, name, surname, gender, dob,
-        constituency, JSON.stringify(face_descriptor),
-        mobile, email,
-        address, district, state, pincode,
-        relative_name, relative_type,
-        disability_type,
-        profile_image_data, dob_proof_data, address_proof_data, disability_proof_data
-    ]);
-};
-
 // Save Full Registration Details (Pending Verification)
 const saveRegistrationDetails = async (details) => {
     const {
+        referenceId, // Expect referenceId from controller
         aadhaar, name, relativeName, relativeType,
         state, district, constituency, dob, gender,
         mobile, email, address, disability, faceDescriptor
@@ -163,12 +90,13 @@ const saveRegistrationDetails = async (details) => {
 
     const query = `
         INSERT INTO voter_registrations 
-        (aadhaar_number, full_name, relative_name, relative_type, state, district, constituency, dob, gender, mobile, email, address, disability_details, face_descriptor_temp, status)
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, 'PENDING')
+        (reference_id, aadhaar_number, full_name, relative_name, relative_type, state, district, constituency, dob, gender, mobile, email, address, disability_details, face_descriptor_temp, status)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, 'PENDING')
         RETURNING application_id
     `;
 
     const { rows } = await pool.query(query, [
+        referenceId, // $1
         aadhaar, name, relativeName, relativeType,
         state, district, constituency, dob, gender,
         mobile, email, address, disability, JSON.stringify(faceDescriptor)
