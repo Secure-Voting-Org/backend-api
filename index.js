@@ -115,12 +115,25 @@ app.get('/api/constituencies', async (req, res) => {
 
 // Add Constituency
 app.post('/api/constituency', async (req, res) => {
-    const { name, district } = req.body;
+    const { name, district, state } = req.body;
     try {
-        const id = await addConstituency(name, district);
+        const id = await addConstituency(name, district, state);
         res.json({ success: true, id });
     } catch (err) {
         res.status(500).json({ error: 'Failed to add constituency' });
+    }
+});
+
+// Delete Constituency
+app.delete('/api/constituency/:id', async (req, res) => {
+    const { id } = req.params;
+    try {
+        const { deleteConstituency } = require('./models/Constituency');
+        await deleteConstituency(id);
+        res.json({ success: true });
+    } catch (err) {
+        console.error(err);
+        res.status(500).json({ error: 'Failed to delete constituency' });
     }
 });
 
