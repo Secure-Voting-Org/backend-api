@@ -149,7 +149,7 @@ const createVoter = async (voterData) => {
             $16, $17, $18,
             $19, $20, $21, $22
         ) RETURNING *`;
-    
+
     const values = [
         id, reference_id, status || 'PENDING', name, surname, gender, dob,
         constituency, face_descriptor ? JSON.stringify(face_descriptor) : null, mobile, email,
@@ -183,4 +183,69 @@ const resetLocks = async (voterId) => {
 };
 
 
-module.exports = { createVoterTable, createRegistrationTable, findVoterById, findVoterByReferenceId, createVoter, saveRegistrationDetails, updateVoterFace, incrementRetry, lockAccount, resetLocks };
+// Find Voter by Email
+const findVoterByEmail = async (email) => {
+    const query = 'SELECT * FROM voters WHERE email = $1';
+    const { rows } = await pool.query(query, [email]);
+    return rows[0];
+};
+
+// Create Voter Auth Table (Pre-registration)
+const createVoterAuthTable = async () => {
+    const query = `
+    CREATE TABLE IF NOT EXISTS voter_auth (
+        id SERIAL PRIMARY KEY,
+        mobile VARCHAR(15) UNIQUE NOT NULL,
+        email VARCHAR(100) UNIQUE,
+        password_hash VARCHAR(255) NOT NULL,
+        full_name VARCHAR(100),
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    )`;
+    await pool.query(query);
+};
+
+// Voter Auth Functions
+const createVoterAuth = async (fullName, mobile, email, password) => {
+    const query = `
+        INSERT INTO voter_auth (full_name, mobile, email, password_hash)
+        VALUES ($1, $2, $3, $4)
+        RETURNING *`;
+    const { rows } = await pool.query(query, [fullName, mobile, email, password]);
+    return rows[0];
+};
+
+const findVoterAuthByMobile = async (mobile) => {
+    const query = 'SELECT * FROM voter_auth WHERE mobile = $1';
+    const { rows } = await pool.query(query, [mobile]);
+    return rows[0];
+};
+
+const findVoterAuthByEmail = async (email) => {
+    const query = 'SELECT * FROM voter_auth WHERE email = $1';
+    const { rows } = await pool.query(query, [email]);
+    return rows[0];
+};
+
+const updateVoterPassword = async (email, newPassword) => {
+    const query = 'UPDATE voter_auth SET password_hash = $1 WHERE email = $2';
+    await pool.query(query, [newPassword, email]);
+};
+
+module.exports = {
+    createVoterTable,
+    createRegistrationTable,
+    createVoterAuthTable,
+    findVoterById,
+    findVoterByReferenceId,
+    findVoterByEmail,
+    createVoter,
+    createVoterAuth,
+    findVoterAuthByMobile,
+    findVoterAuthByEmail,
+    updateVoterPassword,
+    saveRegistrationDetails,
+    updateVoterFace,
+    incrementRetry,
+    lockAccount,
+    resetLocks
+};
