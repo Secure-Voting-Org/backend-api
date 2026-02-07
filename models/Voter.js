@@ -110,4 +110,77 @@ const updateVoterFace = async (voterId, faceDescriptor) => {
     await pool.query(query, [JSON.stringify(faceDescriptor), voterId]);
 };
 
+// Find Voter by ID
+const findVoterById = async (voterId) => {
+    const query = 'SELECT * FROM voters WHERE id = $1';
+    const { rows } = await pool.query(query, [voterId]);
+    return rows[0];
+};
+
+// Find Voter by Reference ID (Application Status)
+const findVoterByReferenceId = async (referenceId) => {
+    // Check voter_registrations first for application status
+    const query = 'SELECT * FROM voter_registrations WHERE reference_id = $1';
+    const { rows } = await pool.query(query, [referenceId]);
+    return rows[0];
+};
+
+// Create a new Voter (Admin/Registration approval)
+const createVoter = async (voterData) => {
+    const {
+        id, reference_id, status, name, surname, gender, dob,
+        constituency, face_descriptor, mobile, email,
+        address, district, state, pincode,
+        relative_name, relative_type, disability_type,
+        profile_image_data, dob_proof_data, address_proof_data, disability_proof_data
+    } = voterData;
+
+    const query = `
+        INSERT INTO voters (
+            id, reference_id, status, name, surname, gender, dob,
+            constituency, face_descriptor, mobile, email,
+            address, district, state, pincode,
+            relative_name, relative_type, disability_type,
+            profile_image_data, dob_proof_data, address_proof_data, disability_proof_data
+        ) VALUES (
+            $1, $2, $3, $4, $5, $6, $7,
+            $8, $9, $10, $11,
+            $12, $13, $14, $15,
+            $16, $17, $18,
+            $19, $20, $21, $22
+        ) RETURNING *`;
+    
+    const values = [
+        id, reference_id, status || 'PENDING', name, surname, gender, dob,
+        constituency, face_descriptor ? JSON.stringify(face_descriptor) : null, mobile, email,
+        address, district, state, pincode,
+        relative_name, relative_type, disability_type,
+        profile_image_data, dob_proof_data, address_proof_data, disability_proof_data
+    ];
+
+    const { rows } = await pool.query(query, values);
+    return rows[0];
+};
+
+// Increment Retry Count
+const incrementRetry = async (voterId) => {
+    const query = 'UPDATE voters SET retry_count = retry_count + 1 WHERE id = $1 RETURNING retry_count';
+    const { rows } = await pool.query(query, [voterId]);
+    return rows[0] ? rows[0].retry_count : 0;
+};
+
+// Lock Account
+const lockAccount = async (voterId, lockDurationMinutes = 15) => {
+    const lockUntil = new Date(Date.now() + lockDurationMinutes * 60000);
+    const query = 'UPDATE voters SET locked_until = $1 WHERE id = $2';
+    await pool.query(query, [lockUntil, voterId]);
+};
+
+// Reset Locks and Retries
+const resetLocks = async (voterId) => {
+    const query = 'UPDATE voters SET retry_count = 0, locked_until = NULL WHERE id = $1';
+    await pool.query(query, [voterId]);
+};
+
+
 module.exports = { createVoterTable, createRegistrationTable, findVoterById, findVoterByReferenceId, createVoter, saveRegistrationDetails, updateVoterFace, incrementRetry, lockAccount, resetLocks };

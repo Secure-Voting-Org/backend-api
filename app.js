@@ -13,7 +13,7 @@ const { findVoterById, updateVoterFace, createVoter, saveRegistrationDetails, in
 const { createLog } = require('./models/Log');
 
 const { getCandidatesByConstituency, getCandidatesByMetadata } = require('./models/Candidate');
-const { findObserverByUsername } = require('./models/Observer');
+const { findObserverByUsername, createObserver } = require('./models/Observer');
 const { castVote, getTurnoutStats, getPublicLedger } = require('./models/Vote');
 
 // NEW MODELS
@@ -424,7 +424,7 @@ app.post('/api/vote', async (req, res) => {
 
 // Observer Login
 app.post('/api/observer/login', async (req, res) => {
-    const { username, password } = req.body;
+    const { username, password, role } = req.body;
     try {
         const observer = await findObserverByUsername(username);
         if (!observer) {
@@ -436,17 +436,177 @@ app.post('/api/observer/login', async (req, res) => {
             return res.status(401).json({ error: 'Invalid credentials' });
         }
 
+        // Verify Role if provided (Strict Login)
+        if (role && observer.role !== role) {
+            return res.status(403).json({ error: 'Invalid credentials' });
+        }
+
         res.json({
             success: true,
             observer: {
                 id: observer.id,
                 username: observer.username,
-                full_name: observer.full_name
+                full_name: observer.full_name,
+                role: observer.role
             }
         });
     } catch (err) {
         console.error(err);
         res.status(500).json({ error: 'Login failed' });
+    }
+});
+
+// Observer Registration
+app.post('/api/observer/register', async (req, res) => {
+    const { username, password, fullName, role, email } = req.body;
+    try {
+        if (!username || !password || !fullName || !email) {
+            return res.status(400).json({ error: 'All fields are required' });
+        }
+
+        const validRoles = ['general', 'expenditure'];
+        const observerRole = validRoles.includes(role) ? role : 'general';
+
+        const existing = await findObserverByUsername(username);
+        if (existing) {
+            return res.status(400).json({ error: 'Username already exists' });
+        }
+
+        // In a real app, hash password here
+        await createObserver(username, password, fullName, observerRole, email);
+
+        // Auto-login or just success
+        const observer = await findObserverByUsername(username);
+
+        res.json({
+            success: true,
+            observer: {
+                id: observer.id,
+                username: observer.username,
+                full_name: observer.full_name,
+                role: observer.role,
+                email: observer.email
+            }
+        });
+    } catch (err) {
+        console.error("Observer Registration Error:", err);
+        res.status(500).json({ error: 'Registration failed' });
+    }
+});
+// OTP Store (In-memory for demo)
+const otpStore = {};
+
+// Forgot Password - Generate OTP
+// Forgot Password - Generate OTP
+app.post('/api/observer/forgot-password', async (req, res) => {
+    const { email } = req.body;
+    try {
+        const { findObserverByEmail } = require('./models/Observer');
+        const observer = await findObserverByEmail(email);
+
+        if (!observer) {
+            return res.status(404).json({ error: 'Email not found' });
+        }
+
+        // Generate 6-digit OTP
+        const otp = Math.floor(100000 + Math.random() * 900000).toString();
+        otpStore[email] = { otp, expires: Date.now() + 300000 }; // 5 mins expiry
+
+        console.log(`[OTP] Password Reset Code for ${email}: ${otp}`);
+
+        // Email Configuration
+        const nodemailer = require('nodemailer');
+
+        let transporter;
+        // Check if credentials exist and are not placeholders
+        if (process.env.EMAIL_USER && process.env.EMAIL_PASS && !process.env.EMAIL_PASS.includes('your_app_password')) {
+            transporter = nodemailer.createTransport({
+                service: 'gmail',
+                auth: {
+                    user: process.env.EMAIL_USER,
+                    pass: process.env.EMAIL_PASS
+                }
+            });
+        }
+
+        if (transporter) {
+            const mailOptions = {
+                from: process.env.EMAIL_USER,
+                to: email,
+                subject: 'Password Reset OTP - SecureVote',
+                text: `Your OTP for password reset is: ${otp}\n\nThis code expires in 5 minutes.`
+            };
+
+            // Send Email
+            await transporter.sendMail(mailOptions);
+            console.log(`[EMAIL] OTP sent to ${email}`);
+
+            // Return success without demo OTP (secure)
+            res.json({ success: true, message: 'OTP sent to your email.' });
+        } else {
+            // Fallback for Demo if no credentials
+            console.log('[EMAIL] Credentials missing/invalid, using demo mode.');
+            res.json({ success: true, message: 'OTP generated (Check Console)', demoOtp: otp });
+        }
+
+    } catch (err) {
+        console.error("Email Error:", err);
+        // Fallback: If email fails, allow demo OTP so flow isn't broken
+        if (otpStore[email]) {
+            res.json({ success: true, message: 'OTP generated (Check Console - Email Failed)', demoOtp: otpStore[email].otp });
+        } else {
+            res.status(500).json({ error: 'Failed to send OTP', details: err.message });
+        }
+    }
+});
+
+// Verify OTP
+app.post('/api/observer/verify-otp', async (req, res) => {
+    const { email, otp } = req.body;
+    const stored = otpStore[email];
+
+    if (!stored) {
+        return res.status(400).json({ error: 'OTP expired or not requested' });
+    }
+
+    if (Date.now() > stored.expires) {
+        delete otpStore[email];
+        return res.status(400).json({ error: 'OTP expired' });
+    }
+
+    if (stored.otp !== otp) {
+        return res.status(400).json({ error: 'Invalid OTP' });
+    }
+
+    res.json({ success: true, message: 'OTP Verified' });
+});
+
+// Reset Password
+app.post('/api/observer/reset-password', async (req, res) => {
+    const { email, otp, newPassword } = req.body;
+    const stored = otpStore[email];
+
+    // Verify OTP again for security
+    if (!stored || stored.otp !== otp) {
+        return res.status(400).json({ error: 'Invalid or expired session' });
+    }
+
+    try {
+        const { findObserverByEmail, updateObserverPassword } = require('./models/Observer');
+        const observer = await findObserverByEmail(email);
+
+        if (!observer) return res.status(404).json({ error: 'User not found' });
+
+        // Update Password
+        await updateObserverPassword(observer.username, newPassword);
+
+        // Clear OTP
+        delete otpStore[email];
+
+        res.json({ success: true, message: 'Password reset successfully' });
+    } catch (err) {
+        console.error(err);
+        res.status(500).json({ error: 'Failed to reset password' });
     }
 });
 

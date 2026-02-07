@@ -1,6 +1,6 @@
 const fetch = global.fetch;
 
-const BASE_URL = 'http://localhost:5000/api/constituency';
+const BASE_URL = 'http://localhost:8081/api/constituency';
 const TEST_NAME = 'TestConstituency_' + Date.now();
 
 async function verify() {
