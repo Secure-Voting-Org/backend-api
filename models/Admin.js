@@ -97,6 +97,31 @@ const updateAdminPassword = async (email, newPassword) => {
     await pool.query('DELETE FROM admin_otps WHERE email = $1', [email]);
 };
 
+// Get All Admins
+const getAllAdmins = async () => {
+    const { rows } = await pool.query('SELECT id, username, full_name, role, email FROM admins ORDER BY id');
+    return rows;
+};
+
+// Delete Admin
+const deleteAdmin = async (id) => {
+    await pool.query('DELETE FROM admins WHERE id = $1', [id]);
+};
+
+// Update Admin
+const updateAdmin = async (id, fullName, email, role, password) => {
+    let query, params;
+    if (password && password.trim() !== '') {
+        query = 'UPDATE admins SET full_name = $1, email = $2, role = $3, password = $4 WHERE id = $5 RETURNING *';
+        params = [fullName, email, role, password, id];
+    } else {
+        query = 'UPDATE admins SET full_name = $1, email = $2, role = $3 WHERE id = $4 RETURNING *';
+        params = [fullName, email, role, id];
+    }
+    const { rows } = await pool.query(query, params);
+    return rows[0];
+};
+
 module.exports = {
     createAdminTable,
     findAdminByUsername,
@@ -104,5 +129,8 @@ module.exports = {
     createAdmin,
     storeOtp,
     verifyOtp,
-    updateAdminPassword
+    updateAdminPassword,
+    getAllAdmins,
+    deleteAdmin,
+    updateAdmin
 };
