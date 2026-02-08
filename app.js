@@ -17,7 +17,8 @@ const { findObserverByUsername } = require('./models/Observer');
 const { castVote, getTurnoutStats, getPublicLedger, getAllVotes } = require('./models/Vote');
 
 // NEW MODELS
-const { findAdminByUsername } = require('./models/Admin');
+const { findAdminByUsername, findAdminByEmail, createAdmin, storeOtp, verifyOtp, updateAdminPassword } = require('./models/Admin');
+const { sendOtpEmail } = require('./services/emailService');
 const { getElectionStatus, updateElectionPhase, toggleKillSwitch } = require('./models/Election');
 const { addConstituency, getAllConstituencies } = require('./models/Constituency');
 const { findCitizen } = require('./models/ElectoralRoll');
@@ -59,6 +60,105 @@ app.post('/api/admin/login', async (req, res) => {
     } catch (err) {
         console.error(err);
         res.status(500).json({ error: 'Login failed' });
+    }
+});
+
+// Admin Registration
+app.post('/api/admin/register', async (req, res) => {
+    const { fullName, email, username, password, role } = req.body;
+
+    try {
+        // Check if username already exists
+        const existingUser = await findAdminByUsername(username);
+        if (existingUser) {
+            return res.status(400).json({ error: 'Username already exists' });
+        }
+
+        // Check if email already exists
+        const existingEmail = await findAdminByEmail(email);
+        if (existingEmail) {
+            return res.status(400).json({ error: 'Email already registered' });
+        }
+
+        // Create new admin
+        const newAdmin = await createAdmin(fullName, email, username, password, role);
+        res.json({ success: true, message: 'Registration successful' });
+    } catch (err) {
+        console.error(err);
+        res.status(500).json({ error: 'Registration failed' });
+    }
+});
+
+// Forgot Password - Send OTP
+app.post('/api/admin/forgot-password/send-otp', async (req, res) => {
+    const { email } = req.body;
+
+    try {
+        // Check if email exists
+        const admin = await findAdminByEmail(email);
+        if (!admin) {
+            return res.status(404).json({ error: 'Email not found' });
+        }
+
+        // Generate 6-digit OTP
+        const otp = Math.floor(100000 + Math.random() * 900000).toString();
+
+        // Store OTP
+        await storeOtp(email, otp);
+
+        // Send OTP via email
+        const emailResult = await sendOtpEmail(email, otp);
+
+        if (emailResult.success) {
+            console.log(`✓ OTP email sent successfully to ${email}`);
+        } else {
+            console.log(`⚠ Email sending failed, but OTP logged to console: ${otp}`);
+        }
+
+        res.json({ success: true, message: 'OTP sent to your email' });
+    } catch (err) {
+        console.error(err);
+        res.status(500).json({ error: 'Failed to send OTP' });
+    }
+});
+
+// Forgot Password - Verify OTP
+app.post('/api/admin/forgot-password/verify-otp', async (req, res) => {
+    const { email, otp } = req.body;
+
+    try {
+        const isValid = await verifyOtp(email, otp);
+
+        if (!isValid) {
+            return res.status(400).json({ error: 'Invalid or expired OTP' });
+        }
+
+        res.json({ success: true, message: 'OTP verified' });
+    } catch (err) {
+        console.error(err);
+        res.status(500).json({ error: 'OTP verification failed' });
+    }
+});
+
+// Forgot Password - Reset Password
+app.post('/api/admin/forgot-password/reset-password', async (req, res) => {
+    const { email, otp, newPassword } = req.body;
+
+    try {
+        // Verify OTP again
+        const isValid = await verifyOtp(email, otp);
+
+        if (!isValid) {
+            return res.status(400).json({ error: 'Invalid or expired OTP' });
+        }
+
+        // Update password
+        await updateAdminPassword(email, newPassword);
+
+        res.json({ success: true, message: 'Password reset successful' });
+    } catch (err) {
+        console.error(err);
+        res.status(500).json({ error: 'Password reset failed' });
     }
 });
 
@@ -135,8 +235,8 @@ app.post('/api/candidate', async (req, res) => {
     res.json({ message: 'Candidate added successfully (Mock)' });
 });
 
-// Register Voter (with Face Data)
-app.post('/api/voter/register', async (req, res) => {
+// Register Voter (with Face Data) - Admin/Legacy
+app.post('/api/admin/voter/register-direct', async (req, res) => {
     try {
         const { id, name, constituency, faceDescriptor } = req.body;
 
@@ -472,7 +572,7 @@ app.post('/api/vote', async (req, res) => {
 
 // Observer Login
 app.post('/api/observer/login', async (req, res) => {
-    const { username, password } = req.body;
+    const { username, password, role } = req.body;
     try {
         const observer = await findObserverByUsername(username);
         if (!observer) {
@@ -484,17 +584,153 @@ app.post('/api/observer/login', async (req, res) => {
             return res.status(401).json({ error: 'Invalid credentials' });
         }
 
+        // Verify Role if provided (Strict Login)
+        if (role && observer.role !== role) {
+            return res.status(403).json({ error: 'Invalid credentials' });
+        }
+
         res.json({
             success: true,
             observer: {
                 id: observer.id,
                 username: observer.username,
-                full_name: observer.full_name
+                full_name: observer.full_name,
+                role: observer.role
             }
         });
     } catch (err) {
         console.error(err);
         res.status(500).json({ error: 'Login failed' });
+    }
+});
+
+// Observer Registration
+app.post('/api/observer/register', async (req, res) => {
+    const { username, password, fullName, role, email } = req.body;
+    try {
+        if (!username || !password || !fullName || !email) {
+            return res.status(400).json({ error: 'All fields are required' });
+        }
+
+        const validRoles = ['general', 'expenditure'];
+        const observerRole = validRoles.includes(role) ? role : 'general';
+
+        const existing = await findObserverByUsername(username);
+        if (existing) {
+            return res.status(400).json({ error: 'Username already exists' });
+        }
+
+        // In a real app, hash password here
+        await createObserver(username, password, fullName, observerRole, email);
+
+        // Auto-login or just success
+        const observer = await findObserverByUsername(username);
+
+        res.json({
+            success: true,
+            observer: {
+                id: observer.id,
+                username: observer.username,
+                full_name: observer.full_name,
+                role: observer.role,
+                email: observer.email
+            }
+        });
+    } catch (err) {
+        console.error("Observer Registration Error:", err);
+        res.status(500).json({ error: 'Registration failed' });
+    }
+});
+// OTP Store (In-memory for demo)
+const otpStore = {};
+
+// Forgot Password - Generate OTP
+// Forgot Password - Generate OTP
+app.post('/api/observer/forgot-password', async (req, res) => {
+    const { email } = req.body;
+    try {
+        const { findObserverByEmail } = require('./models/Observer');
+        const observer = await findObserverByEmail(email);
+
+        if (!observer) {
+            return res.status(404).json({ error: 'Email not found' });
+        }
+
+        // Generate 6-digit OTP
+        const otp = Math.floor(100000 + Math.random() * 900000).toString();
+        otpStore[email] = { otp, expires: Date.now() + 300000 }; // 5 mins expiry
+
+        console.log(`[OTP] Password Reset Code for ${email}: ${otp}`);
+
+        // Send OTP via centralized email service
+        const emailResult = await sendOtpEmail(email, otp);
+
+        if (emailResult.success) {
+            console.log(`✓ OTP email sent successfully to ${email}`);
+            res.json({ success: true, message: 'OTP sent to your email.' });
+        } else {
+            console.log(`⚠ Email sending failed, but OTP logged to console: ${otp}`);
+            res.json({ success: true, message: 'OTP generated (Check Console - Email Failed)', demoOtp: otp });
+        }
+
+    } catch (err) {
+        console.error("Email Error:", err);
+        // Fallback: If email fails, allow demo OTP so flow isn't broken
+        if (otpStore[email]) {
+            res.json({ success: true, message: 'OTP generated (Check Console - Email Failed)', demoOtp: otpStore[email].otp });
+        } else {
+            res.status(500).json({ error: 'Failed to send OTP', details: err.message });
+        }
+    }
+});
+
+// Verify OTP
+app.post('/api/observer/verify-otp', async (req, res) => {
+    const { email, otp } = req.body;
+    const stored = otpStore[email];
+
+    if (!stored) {
+        return res.status(400).json({ error: 'OTP expired or not requested' });
+    }
+
+    if (Date.now() > stored.expires) {
+        delete otpStore[email];
+        return res.status(400).json({ error: 'OTP expired' });
+    }
+
+    if (stored.otp !== otp) {
+        return res.status(400).json({ error: 'Invalid OTP' });
+    }
+
+    res.json({ success: true, message: 'OTP Verified' });
+});
+
+// Reset Password
+app.post('/api/observer/reset-password', async (req, res) => {
+    const { email, otp, newPassword } = req.body;
+    const stored = otpStore[email];
+
+    // Verify OTP again for security
+    if (!stored || stored.otp !== otp) {
+        return res.status(400).json({ error: 'Invalid or expired session' });
+    }
+
+    try {
+        const { findObserverByEmail, updateObserverPassword } = require('./models/Observer');
+        const observer = await findObserverByEmail(email);
+
+        if (!observer) return res.status(404).json({ error: 'User not found' });
+
+        // Update Password
+        await updateObserverPassword(observer.username, newPassword);
+
+        // Clear OTP
+        delete otpStore[email];
+
+        res.json({ success: true, message: 'Password reset successfully' });
+    } catch (err) {
+        console.error(err);
+        res.status(500).json({ error: 'Failed to reset password' });
     }
 });
 
@@ -648,6 +884,132 @@ app.post('/api/admin/recovery/approve', async (req, res) => {
         res.json({ success: true, message: 'Recovery Request Approved. User can now login.' });
     } catch (err) {
         res.status(500).json({ error: 'Approval Failed' });
+    }
+});
+
+// ==========================================
+// VOTER AUTHENTICATION (Real Auth)
+// ==========================================
+
+const { createVoterAuth, findVoterAuthByMobile, findVoterAuthByEmail, updateVoterPassword } = require('./models/Voter');
+
+// Voter Register
+app.post('/api/voter/register', async (req, res) => {
+    const { fullName, mobile, password, email } = req.body;
+    try {
+        if (!fullName || !mobile || !password) {
+            return res.status(400).json({ error: 'All fields are required' });
+        }
+
+        const existingMobile = await findVoterAuthByMobile(mobile);
+        if (existingMobile) {
+            return res.status(400).json({ error: 'Mobile number already registered' });
+        }
+
+        // Optional: Check email uniqueness if provided
+        if (email) {
+            const existingEmail = await findVoterAuthByEmail(email);
+            if (existingEmail) {
+                return res.status(400).json({ error: 'Email already registered' });
+            }
+        }
+
+        // In a real app, hash password here!
+        // const hashedPassword = await bcrypt.hash(password, 10);
+        const voter = await createVoterAuth(fullName, mobile, email, password);
+
+        res.json({ success: true, user: { name: voter.full_name, mobile: voter.mobile, email: voter.email } });
+    } catch (err) {
+        console.error("Voter Registration Error:", err);
+        res.status(500).json({ error: 'Registration failed' });
+    }
+});
+
+// Voter Login
+app.post('/api/voter/login', async (req, res) => {
+    const { mobile, password } = req.body;
+    try {
+        const voter = await findVoterAuthByMobile(mobile);
+        if (!voter || voter.password_hash !== password) {
+            return res.status(401).json({ error: 'Invalid mobile or password' });
+        }
+
+        res.json({ success: true, user: { name: voter.full_name, mobile: voter.mobile, email: voter.email } });
+    } catch (err) {
+        console.error("Voter Login Error:", err);
+        res.status(500).json({ error: 'Login failed' });
+    }
+});
+
+// Voter Forgot Password - Send OTP
+app.post('/api/voter/forgot-password', async (req, res) => {
+    const { email } = req.body;
+    try {
+        const voter = await findVoterAuthByEmail(email);
+        if (!voter) {
+            return res.status(404).json({ error: 'Email not found' });
+        }
+
+        // Reuse existing OTP logic (could be refactored into a helper)
+        const otp = Math.floor(100000 + Math.random() * 900000).toString();
+        otpStore[email] = { otp, expires: Date.now() + 300000 };
+
+        console.log(`[VOTER OTP] Reset Code for ${email}: ${otp}`);
+
+        // Email Sending Logic (Reused)
+        const nodemailer = require('nodemailer');
+        let transporter;
+        if (process.env.EMAIL_USER && process.env.EMAIL_PASS && !process.env.EMAIL_PASS.includes('your_app_password')) {
+            transporter = nodemailer.createTransport({
+                service: 'gmail',
+                auth: { user: process.env.EMAIL_USER, pass: process.env.EMAIL_PASS }
+            });
+        }
+
+        if (transporter) {
+            await transporter.sendMail({
+                from: process.env.EMAIL_USER,
+                to: email,
+                subject: 'Voter Password Reset OTP - SecureVote',
+                text: `Your OTP for password reset is: ${otp}\n\nThis code expires in 5 minutes.`
+            });
+            console.log(`[EMAIL] OTP sent to ${email}`);
+            res.json({ success: true, message: 'OTP sent to your email.' });
+        } else {
+            // Demo Fallback
+            res.json({ success: true, message: 'OTP generated (Check Console)', demoOtp: otp });
+        }
+    } catch (err) {
+        console.error(err);
+        res.status(500).json({ error: 'Failed to send OTP' });
+    }
+});
+
+// Voter Verify OTP
+app.post('/api/voter/verify-otp', (req, res) => {
+    const { email, otp } = req.body;
+    const stored = otpStore[email];
+
+    if (!stored) return res.status(400).json({ error: 'OTP expired or not requested' });
+    if (Date.now() > stored.expires) {
+        delete otpStore[email];
+        return res.status(400).json({ error: 'OTP expired' });
+    }
+    if (stored.otp !== otp) return res.status(400).json({ error: 'Invalid OTP' });
+
+    delete otpStore[email]; // Consume OTP
+    res.json({ success: true, message: 'OTP Verified' });
+});
+
+// Voter Reset Password
+app.post('/api/voter/reset-password', async (req, res) => {
+    const { email, newPassword } = req.body;
+    try {
+        await updateVoterPassword(email, newPassword);
+        res.json({ success: true, message: 'Password updated successfully' });
+    } catch (err) {
+        console.error(err);
+        res.status(500).json({ error: 'Failed to reset password' });
     }
 });
 
