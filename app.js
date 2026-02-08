@@ -1129,4 +1129,275 @@ app.post('/api/voter/reset-password', async (req, res) => {
     }
 });
 
+// ===== POST-POLL RESULT ENDPOINTS =====
+
+// Get Constituency Results
+app.get('/api/results/constituency/:id', async (req, res) => {
+    try {
+        const constituencyId = req.params.id;
+
+        // Get constituency info
+        const { rows: [constituency] } = await pool.query(
+            'SELECT * FROM constituencies WHERE id = $1',
+            [constituencyId]
+        );
+
+        if (!constituency) {
+            return res.status(404).json({ error: 'Constituency not found' });
+        }
+
+        // Get candidate results
+        const { rows: results } = await pool.query(`
+            SELECT 
+                c.id,
+                c.name,
+                c.party,
+                c.symbol,
+                COUNT(v.id) as vote_count
+            FROM candidates c
+            LEFT JOIN votes v ON v.candidate_id = c.id
+            WHERE c.constituency_id = $1
+            GROUP BY c.id, c.name, c.party, c.symbol
+            ORDER BY vote_count DESC
+        `, [constituencyId]);
+
+        // Calculate total votes
+        const totalVotes = results.reduce((sum, r) => sum + parseInt(r.vote_count), 0);
+
+        // Add vote share percentage
+        const resultsWithPercentage = results.map(r => ({
+            ...r,
+            vote_share: totalVotes > 0 ? ((parseInt(r.vote_count) / totalVotes) * 100).toFixed(2) : '0.00'
+        }));
+
+        // Get voter turnout
+        const { rows: [turnout] } = await pool.query(`
+            SELECT 
+                COUNT(*) as total_voters,
+                COUNT(CASE WHEN has_voted = true THEN 1 END) as voted_count
+            FROM voters
+            WHERE constituency = $1
+        `, [constituency.name]);
+
+        res.json({
+            constituency,
+            results: resultsWithPercentage,
+            totalVotes,
+            turnout: {
+                total: parseInt(turnout.total_voters),
+                voted: parseInt(turnout.voted_count),
+                percentage: turnout.total_voters > 0
+                    ? ((parseInt(turnout.voted_count) / parseInt(turnout.total_voters)) * 100).toFixed(2)
+                    : '0.00'
+            },
+            winner: resultsWithPercentage[0] || null
+        });
+    } catch (err) {
+        console.error('Error fetching constituency results:', err);
+        res.status(500).json({ error: 'Failed to fetch results' });
+    }
+});
+
+// Get Overall Election Summary
+app.get('/api/results/summary', async (req, res) => {
+    try {
+        // Get all constituencies
+        const { rows: constituencies } = await pool.query('SELECT * FROM constituencies');
+
+        // Get total votes cast
+        const { rows: [voteStats] } = await pool.query('SELECT COUNT(*) as total_votes FROM votes');
+
+        // Get total registered voters
+        const { rows: [voterStats] } = await pool.query(`
+            SELECT 
+                COUNT(*) as total_voters,
+                COUNT(CASE WHEN has_voted = true THEN 1 END) as voted_count
+            FROM voters
+        `);
+
+        // Get party-wise results
+        const { rows: partyResults } = await pool.query(`
+            SELECT 
+                c.party,
+                COUNT(v.id) as vote_count
+            FROM candidates c
+            LEFT JOIN votes v ON v.candidate_id = c.id
+            GROUP BY c.party
+            ORDER BY vote_count DESC
+        `);
+
+        const totalVotes = parseInt(voteStats.total_votes);
+        const partyResultsWithPercentage = partyResults.map(p => ({
+            ...p,
+            vote_count: parseInt(p.vote_count),
+            vote_share: totalVotes > 0 ? ((parseInt(p.vote_count) / totalVotes) * 100).toFixed(2) : '0.00'
+        }));
+
+        res.json({
+            totalConstituencies: constituencies.length,
+            totalVotes,
+            totalVoters: parseInt(voterStats.total_voters),
+            votedCount: parseInt(voterStats.voted_count),
+            turnoutPercentage: voterStats.total_voters > 0
+                ? ((parseInt(voterStats.voted_count) / parseInt(voterStats.total_voters)) * 100).toFixed(2)
+                : '0.00',
+            partyResults: partyResultsWithPercentage
+        });
+    } catch (err) {
+        console.error('Error fetching election summary:', err);
+        res.status(500).json({ error: 'Failed to fetch summary' });
+    }
+});
+
+// Get Voter Turnout Statistics
+app.get('/api/results/turnout', async (req, res) => {
+    try {
+        // Overall turnout
+        const { rows: [overall] } = await pool.query(`
+            SELECT 
+                COUNT(*) as total_voters,
+                COUNT(CASE WHEN has_voted = true THEN 1 END) as voted_count
+            FROM voters
+        `);
+
+        // Constituency-wise turnout
+        const { rows: constituencyTurnout } = await pool.query(`
+            SELECT 
+                constituency,
+                COUNT(*) as total_voters,
+                COUNT(CASE WHEN has_voted = true THEN 1 END) as voted_count
+            FROM voters
+            GROUP BY constituency
+            ORDER BY constituency
+        `);
+
+        const constituencyStats = constituencyTurnout.map(c => ({
+            ...c,
+            total_voters: parseInt(c.total_voters),
+            voted_count: parseInt(c.voted_count),
+            percentage: c.total_voters > 0
+                ? ((parseInt(c.voted_count) / parseInt(c.total_voters)) * 100).toFixed(2)
+                : '0.00'
+        }));
+
+        res.json({
+            overall: {
+                total: parseInt(overall.total_voters),
+                voted: parseInt(overall.voted_count),
+                percentage: overall.total_voters > 0
+                    ? ((parseInt(overall.voted_count) / parseInt(overall.total_voters)) * 100).toFixed(2)
+                    : '0.00'
+            },
+            byConstituency: constituencyStats
+        });
+    } catch (err) {
+        console.error('Error fetching turnout:', err);
+        res.status(500).json({ error: 'Failed to fetch turnout statistics' });
+    }
+});
+
+// Generate Form 20 (Result Sheet)
+app.get('/api/results/form20/:constituencyId', async (req, res) => {
+    try {
+        const constituencyId = req.params.constituencyId;
+
+        // Get full constituency results
+        const resultsResponse = await fetch(`http://localhost:8081/api/results/constituency/${constituencyId}`);
+        const data = await resultsResponse.json();
+
+        // Generate Form 20 data
+        const form20 = {
+            formNumber: 'Form 20',
+            title: 'RESULT SHEET',
+            constituencyName: data.constituency.name,
+            district: data.constituency.district,
+            state: data.constituency.state,
+            dateOfCounting: new Date().toLocaleDateString('en-IN'),
+            timeOfDeclaration: new Date().toLocaleTimeString('en-IN'),
+            candidates: data.results,
+            totalValidVotes: data.totalVotes,
+            totalRejectedVotes: 0, // Can be enhanced
+            turnout: data.turnout,
+            winner: data.winner,
+            marginOfVictory: data.results.length > 1
+                ? parseInt(data.results[0].vote_count) - parseInt(data.results[1].vote_count)
+                : parseInt(data.results[0]?.vote_count || 0),
+            returningOfficer: 'Returning Officer', // Can be enhanced with actual RO details
+            timestamp: new Date().toISOString()
+        };
+
+        res.json(form20);
+    } catch (err) {
+        console.error('Error generating Form 20:', err);
+        res.status(500).json({ error: 'Failed to generate Form 20' });
+    }
+});
+
+// Declare Results (with audit logging)
+app.post('/api/results/declare/:constituencyId', async (req, res) => {
+    try {
+        const constituencyId = req.params.constituencyId;
+        const { adminUsername, adminRole } = req.body;
+
+        // Verify POST_POLL authorization
+        if (adminRole !== 'POST_POLL') {
+            return res.status(403).json({ error: 'Only POST_POLL admins can declare results' });
+        }
+
+        // Get constituency results
+        const { rows: [constituency] } = await pool.query(
+            'SELECT * FROM constituencies WHERE id = $1',
+            [constituencyId]
+        );
+
+        if (!constituency) {
+            return res.status(404).json({ error: 'Constituency not found' });
+        }
+
+        // Get winner
+        const { rows: results } = await pool.query(`
+            SELECT 
+                c.id,
+                c.name,
+                c.party,
+                COUNT(v.id) as vote_count
+            FROM candidates c
+            LEFT JOIN votes v ON v.candidate_id = c.id
+            WHERE c.constituency_id = $1
+            GROUP BY c.id, c.name, c.party
+            ORDER BY vote_count DESC
+            LIMIT 1
+        `, [constituencyId]);
+
+        const winner = results[0];
+
+        // Log result declaration
+        await createLog({
+            event: 'RESULT_DECLARED',
+            user_id: adminUsername,
+            details: {
+                constituency_id: constituencyId,
+                constituency_name: constituency.name,
+                winner_name: winner.name,
+                winner_party: winner.party,
+                vote_count: winner.vote_count,
+                declared_by: adminUsername,
+                role: adminRole
+            },
+            ip_address: req.ip
+        });
+
+        res.json({
+            success: true,
+            message: 'Results declared successfully',
+            constituency: constituency.name,
+            winner: winner
+        });
+    } catch (err) {
+        console.error('Error declaring results:', err);
+        res.status(500).json({ error: 'Failed to declare results' });
+    }
+});
+
 module.exports = app;
+
