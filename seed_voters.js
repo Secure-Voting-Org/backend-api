@@ -10,11 +10,12 @@ const seedVoters = async () => {
         await checkDbConnection();
         console.log("Connected to DB.");
 
-        // Clear existing voters
-        await pool.query('TRUNCATE TABLE voters RESTART IDENTITY');
-        console.log("Cleared old voters.");
+        // FIX: Added CASCADE to handle tables that reference 'voters'
+        // This clears 'voter_registrations' automatically so 'voters' can be cleared
+        await pool.query('TRUNCATE TABLE voters RESTART IDENTITY CASCADE');
+        console.log("Cleared old voters and dependent registration records.");
 
-        // Create table just in case
+        // Create table just in case it was dropped or doesn't exist
         await createVoterTable();
 
         const voters = [
@@ -33,7 +34,7 @@ const seedVoters = async () => {
             console.log(`Created voter ${voter.name} (${voter.constituency})`);
         }
 
-        console.log("Voter seeding completed.");
+        console.log("Voter seeding completed successfully.");
         process.exit(0);
     } catch (err) {
         console.error("Voter seeding failed:", err);

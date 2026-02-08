@@ -18,13 +18,14 @@ const createVoteTable = async () => {
 // Cast Vote
 const castVote = async (voterId, candidateId, constituency) => {
     // Generate a mock blockchain hash
+    // candidateId is now an encrypted string, so we just treat it as data.
     const data = `${voterId}-${candidateId}-${Date.now()}`;
     const transactionHash = crypto.createHash('sha256').update(data).digest('hex');
 
     const query = 'INSERT INTO votes (voter_id, candidate_id, constituency, transaction_hash) VALUES ($1, $2, $3, $4)';
     await pool.query(query, [voterId, candidateId, constituency, transactionHash]);
 
-    return transactionHash;
+    return { success: true, transactionHash };
 };
 
 // Get Turnout Stats
@@ -42,4 +43,11 @@ const getPublicLedger = async (limit = 20) => {
     return rows;
 };
 
-module.exports = { createVoteTable, castVote, getTurnoutStats, getPublicLedger };
+// Get All Votes (For Tallying - Admin Only)
+const getAllVotes = async () => {
+    const query = 'SELECT candidate_id, constituency FROM votes';
+    const { rows } = await pool.query(query);
+    return rows;
+};
+
+module.exports = { createVoteTable, castVote, getTurnoutStats, getPublicLedger, getAllVotes };
