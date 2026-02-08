@@ -26,10 +26,12 @@ const gcd = (a, b) => {
 };
 
 // Helper: Modular Inverse using Extended Euclidean Algorithm
+// Helper: Modular Inverse using Extended Euclidean Algorithm
 const modInverse = (a, m) => {
-    let [m0, x, y] = [m, BigInt(0), BigInt(1)];
+    let [m0, y, x] = [m, BigInt(0), BigInt(1)];
     if (m === BigInt(1)) return BigInt(0);
     while (a > BigInt(1)) {
+        if (m === BigInt(0)) return BigInt(0);
         let q = a / m;
         [m, a] = [a % m, m];
         [y, x] = [x - q * y, y];

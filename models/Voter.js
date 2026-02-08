@@ -78,7 +78,12 @@ const createRegistrationTable = async () => {
 };
 
 
-// Find Voter by Reference ID
+// Find Voter by ID
+const findVoterById = async (id) => {
+    const query = 'SELECT * FROM voters WHERE id = $1';
+    const { rows } = await pool.query(query, [id]);
+    return rows[0];
+};
 const findVoterByReferenceId = async (referenceId) => {
     const query = 'SELECT * FROM voters WHERE reference_id = $1';
     const { rows } = await pool.query(query, [referenceId]);
@@ -132,6 +137,19 @@ const incrementRetry = async (voterId) => {
 // Lock Account
 const lockAccount = async (voterId, minutes) => {
     const query = `UPDATE voters SET locked_until = NOW() + INTERVAL '${minutes} minutes' WHERE id = $1`;
+    await pool.query(query, [voterId]);
+};
+
+// Check if Token Issued
+const checkTokenIssued = async (voterId) => {
+    const query = 'SELECT is_token_issued FROM voters WHERE id = $1';
+    const { rows } = await pool.query(query, [voterId]);
+    return rows[0] ? rows[0].is_token_issued : false;
+};
+
+// Mark Token Issued
+const markTokenIssued = async (voterId) => {
+    const query = 'UPDATE voters SET is_token_issued = TRUE WHERE id = $1';
     await pool.query(query, [voterId]);
 };
 
@@ -251,5 +269,7 @@ module.exports = {
     incrementRetry,
     lockAccount,
     resetLocks,
-    getAllVoters
+    getAllVoters,
+    checkTokenIssued,
+    markTokenIssued
 };

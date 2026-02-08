@@ -709,16 +709,17 @@ app.post('/api/blind-sign', async (req, res) => {
     const voter = await findVoterById(voterId);
     if (!voter) return res.status(404).json({ error: 'Voter not found' });
 
-    // Check if already issued (Simulated check using a DB column or separate table)
-    // const hasIssued = await checkTokenIssued(voterId);
-    // if (hasIssued) return res.status(403).json({ error: 'Token already issued' });
+    // Check if already issued (Prevent Double Issuance)
+    const { checkTokenIssued, markTokenIssued } = require('./models/Voter');
+    const hasIssued = await checkTokenIssued(voterId);
+    if (hasIssued) return res.status(403).json({ error: 'Voting Token already issued to this user.' });
 
     try {
         // 2. Sign the Blinded Token
         const signature = BlindSignature.blindSign(blinded_token);
 
         // 3. Mark as Issued (Important!)
-        // await markTokenIssued(voterId);
+        await markTokenIssued(voterId);
 
         res.json({ signature });
     } catch (err) {
@@ -763,8 +764,9 @@ app.post('/api/vote', async (req, res) => {
         }
     } catch (err) {
         console.error("Voting Error:", err);
-        if (err.code === '23505') {
-            return res.status(400).json({ error: 'Vote already cast with this token.' });
+        // Handle Unique Constraint Violation (Double Voting)
+        if (err.code === '23505') { // Postgres unique_violation for unique_voter_id
+            return res.status(403).json({ error: 'Duplicate Vote: This token has already been used.' });
         }
         res.status(500).json({ error: 'Voting failed' });
     }

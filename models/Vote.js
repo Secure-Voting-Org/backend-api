@@ -6,8 +6,8 @@ const createVoteTable = async () => {
     const query = `
     CREATE TABLE IF NOT EXISTS votes (
         id SERIAL PRIMARY KEY,
-        voter_id VARCHAR(50) NOT NULL, -- Hashed or encrypted in real system
-        candidate_id INT NOT NULL,
+        voter_id TEXT NOT NULL,         -- Hashed Anonymous ID (SHA-256)
+        candidate_id TEXT NOT NULL,     -- Encrypted Vote Data (Ciphertext)
         constituency VARCHAR(100) NOT NULL,
         transaction_hash VARCHAR(64) NOT NULL,
         timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP
