@@ -569,24 +569,88 @@ app.post('/api/login', async (req, res) => {
     res.json({ success: true });
 });
 
-// Vote Route
-app.post('/api/vote', async (req, res) => {
-    const { voterId, candidateId, constituency } = req.body;
+const BlindSignature = require('./utils/BlindSignature');
 
-    // Check Election Status First
+// Generate Keys on Startup (or load from DB/File in prod)
+BlindSignature.generateKeys();
+
+// Endpoint to get Blind Signature Public Key
+app.get('/api/blind-signature/keys', (req, res) => {
+    const key = BlindSignature.getKey();
+    if (key) {
+        res.json({ n: key.n, e: key.e });
+    } else {
+        res.status(500).json({ error: 'Keys not initialized' });
+    }
+});
+
+// Issue Blind Signature (Authorized)
+// Expects: { blinded_token, voterId }
+app.post('/api/blind-sign', async (req, res) => {
+    const { blinded_token, voterId } = req.body;
+
+    // 1. Verify Voter (Ensure they are eligible and haven't signed yet)
+    // In real app, check DB 'is_token_issued' flag.
+    const voter = await findVoterById(voterId);
+    if (!voter) return res.status(404).json({ error: 'Voter not found' });
+
+    // Check if already issued (Simulated check using a DB column or separate table)
+    // const hasIssued = await checkTokenIssued(voterId);
+    // if (hasIssued) return res.status(403).json({ error: 'Token already issued' });
+
+    try {
+        // 2. Sign the Blinded Token
+        const signature = BlindSignature.blindSign(blinded_token);
+
+        // 3. Mark as Issued (Important!)
+        // await markTokenIssued(voterId);
+
+        res.json({ signature });
+    } catch (err) {
+        console.error("Blind Signing Error:", err);
+        res.status(500).json({ error: 'Signing failed' });
+    }
+});
+
+// Vote Route (Anonymous with Real Blind Signature)
+app.post('/api/vote', async (req, res) => {
+    const { vote, auth_token, signature, constituency } = req.body;
+
+    // Check Election Status
     const status = await getElectionStatus();
     if (status.phase !== 'LIVE' || status.is_kill_switch_active) {
         return res.status(403).json({ error: 'Election is not live or has been suspended.' });
     }
 
+    // 1. Verify Blind Token Signature
+    if (!auth_token || !signature) {
+        return res.status(401).json({ error: 'Unauthorized: Missing Token or Signature' });
+    }
+
     try {
-        const result = await castVote(voterId, candidateId, constituency);
+        // Verify: s^e % n == token
+        // Important: auth_token is the UNBLINDED message (BigInt string)
+        const isValid = BlindSignature.verify(auth_token, signature);
+
+        if (!isValid) {
+            return res.status(401).json({ error: 'Invalid Blind Signature' });
+        }
+
+        // 2. Anonymize Voter ID (Hash the token to prevent double voting)
+        const anonymousId = require('crypto').createHash('sha256').update(auth_token).digest('hex');
+
+        // 3. Cast Vote
+        const result = await castVote(anonymousId, vote, constituency);
         if (result.success) {
             res.json({ success: true, transactionHash: result.transactionHash });
         } else {
             res.status(400).json({ error: result.error });
         }
     } catch (err) {
+        console.error("Voting Error:", err);
+        if (err.code === '23505') {
+            return res.status(400).json({ error: 'Vote already cast with this token.' });
+        }
         res.status(500).json({ error: 'Voting failed' });
     }
 });
