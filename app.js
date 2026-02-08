@@ -14,7 +14,7 @@ const { createLog } = require('./models/Log');
 
 const { getCandidatesByConstituency, getCandidatesByMetadata } = require('./models/Candidate');
 const { findObserverByUsername } = require('./models/Observer');
-const { castVote, getTurnoutStats, getPublicLedger } = require('./models/Vote');
+const { castVote, getTurnoutStats, getPublicLedger, getAllVotes } = require('./models/Vote');
 
 // NEW MODELS
 const { findAdminByUsername } = require('./models/Admin');
@@ -22,10 +22,23 @@ const { getElectionStatus, updateElectionPhase, toggleKillSwitch } = require('./
 const { addConstituency, getAllConstituencies } = require('./models/Constituency');
 const { findCitizen } = require('./models/ElectoralRoll');
 const { createRecoveryRequest, getRecoveryRequest, updateRecoveryStatus, getAllRecoveryRequests } = require('./models/RecoveryRequest');
+const { loadOrGenerateKeys, getPublicKey, getPrivateKey } = require('./utils/encryption_keys');
+
+// Load keys on start
+loadOrGenerateKeys().catch(err => console.error("Failed to load election keys:", err));
 
 // Routes
 app.get('/', (req, res) => {
     res.json({ message: 'SecureVote Backend API is running' });
+});
+
+app.get('/api/election/public-key', async (req, res) => {
+    try {
+        const key = await getPublicKey();
+        res.json(key);
+    } catch (err) {
+        res.status(500).json({ error: 'Failed to retrieve election key' });
+    }
 });
 
 // --- ADMIN ROUTES ---
@@ -68,6 +81,27 @@ app.post('/api/election/update', async (req, res) => {
         res.json({ success: true });
     } catch (err) {
         res.status(500).json({ error: 'Update failed' });
+    }
+});
+
+// --- TALLYING AUTHORITY ROUTES (ADMIN ONLY) ---
+app.get('/api/admin/votes', async (req, res) => {
+    // In production, Strict Auth Middleware here!
+    try {
+        const votes = await getAllVotes();
+        res.json(votes);
+    } catch (err) {
+        res.status(500).json({ error: 'Failed to fetch votes' });
+    }
+});
+
+app.get('/api/admin/election/private-key', async (req, res) => {
+    // In production, Strict Auth Middleware here!
+    try {
+        const key = await getPrivateKey();
+        res.json(key);
+    } catch (err) {
+        res.status(500).json({ error: 'Failed to fetch private key' });
     }
 });
 
@@ -277,6 +311,13 @@ app.get('/api/candidates', async (req, res) => {
     if (!constituency) {
         return res.status(400).json({ error: 'Constituency is required' });
     }
+
+    // Check Status
+    const status = await getElectionStatus();
+    if (status.phase !== 'LIVE') {
+        return res.status(403).json({ error: 'Election is not LIVE. Candidates are not visible.' });
+    }
+
     try {
         const candidates = await getCandidatesByConstituency(constituency);
         res.json(candidates);
@@ -305,6 +346,13 @@ app.get('/api/candidates/search', async (req, res) => {
  */
 app.get('/api/voter/ballot/:voterId', async (req, res) => {
     const { voterId } = req.params;
+
+    // Check Status
+    const status = await getElectionStatus();
+    if (status.phase !== 'LIVE') {
+        return res.status(403).json({ error: 'Election is not LIVE. Ballot not available.' });
+    }
+
     try {
         const voter = await findVoterById(voterId);
         if (!voter) {

@@ -77,7 +77,68 @@ const createRegistrationTable = async () => {
     await pool.query(query);
 };
 
-// ... (existing functions)
+// Find Voter by ID
+const findVoterById = async (id) => {
+    const query = 'SELECT * FROM voters WHERE id = $1';
+    const { rows } = await pool.query(query, [id]);
+    return rows[0];
+};
+
+// Find Voter by Reference ID
+const findVoterByReferenceId = async (referenceId) => {
+    const query = 'SELECT * FROM voters WHERE reference_id = $1';
+    const { rows } = await pool.query(query, [referenceId]);
+    return rows[0];
+};
+
+// Create Voter (Approved/Full Profile)
+const createVoter = async (voter) => {
+    const query = `
+        INSERT INTO voters (
+            id, reference_id, name, surname, gender, dob, 
+            mobile, email, address, district, state, pincode, 
+            relative_name, relative_type, disability_type, 
+            profile_image_data, dob_proof_data, address_proof_data, disability_proof_data,
+            constituency, face_descriptor,
+            status
+        ) VALUES (
+            $1, $2, $3, $4, $5, $6, 
+            $7, $8, $9, $10, $11, $12, 
+            $13, $14, $15, 
+            $16, $17, $18, $19,
+            $20, $21,
+            'APPROVED'
+        ) RETURNING *
+    `;
+    const values = [
+        voter.id, voter.reference_id, voter.name, voter.surname, voter.gender, voter.dob,
+        voter.mobile, voter.email, voter.address, voter.district, voter.state, voter.pincode,
+        voter.relative_name, voter.relative_type, voter.disability_type,
+        voter.profile_image_data, voter.dob_proof_data, voter.address_proof_data, voter.disability_proof_data,
+        voter.constituency, JSON.stringify(voter.face_descriptor)
+    ];
+    const { rows } = await pool.query(query, values);
+    return rows[0];
+};
+
+// Increment Retry Count
+const incrementRetry = async (voterId) => {
+    const query = 'UPDATE voters SET retry_count = retry_count + 1 WHERE id = $1 RETURNING retry_count';
+    const { rows } = await pool.query(query, [voterId]);
+    return rows[0] ? rows[0].retry_count : 0;
+};
+
+// Lock Account
+const lockAccount = async (voterId, minutes) => {
+    const query = `UPDATE voters SET locked_until = NOW() + INTERVAL '${minutes} minutes' WHERE id = $1`;
+    await pool.query(query, [voterId]);
+};
+
+// Reset Locks
+const resetLocks = async (voterId) => {
+    const query = 'UPDATE voters SET retry_count = 0, locked_until = NULL WHERE id = $1';
+    await pool.query(query, [voterId]);
+};
 
 // Save Full Registration Details (Pending Verification)
 const saveRegistrationDetails = async (details) => {
