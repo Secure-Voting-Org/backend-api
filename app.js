@@ -12,12 +12,13 @@ app.use(express.json({ limit: '50mb' }));
 const { findVoterById, updateVoterFace, createVoter, saveRegistrationDetails, incrementRetry, lockAccount, resetLocks } = require('./models/Voter');
 const { createLog } = require('./models/Log');
 
-const { getCandidatesByConstituency, getCandidatesByMetadata } = require('./models/Candidate');
+const { getCandidatesByConstituency, getCandidatesByMetadata, createCandidate } = require('./models/Candidate');
 const { findObserverByUsername } = require('./models/Observer');
 const { castVote, getTurnoutStats, getPublicLedger, getAllVotes } = require('./models/Vote');
 
 // NEW MODELS
 const { findAdminByUsername, findAdminByEmail, createAdmin, storeOtp, verifyOtp, updateAdminPassword } = require('./models/Admin');
+const { findSysAdminByUsername, createSysAdmin } = require('./models/SysAdmin');
 const { sendOtpEmail } = require('./services/emailService');
 const { getElectionStatus, updateElectionPhase, toggleKillSwitch } = require('./models/Election');
 const { addConstituency, getAllConstituencies } = require('./models/Constituency');
@@ -229,10 +230,30 @@ app.post('/api/constituency', async (req, res) => {
 });
 
 // Add Candidate
+// Add Candidate
 app.post('/api/candidate', async (req, res) => {
-    // Not implemented yet in Candidate Model
-    // await addCandidate(req.body);
-    res.json({ message: 'Candidate added successfully (Mock)' });
+    try {
+        const { name, party, constituency, symbol } = req.body;
+        // Basic validation
+        if (!name || !constituency || !symbol) {
+            return res.status(400).json({ error: 'Name, Constituency, and Symbol are required' });
+        }
+
+        // Use createCandidate from model
+        // Passing null for photo_url as it's not currently sent by frontend
+        await createCandidate({
+            name,
+            party,
+            constituency,
+            symbol,
+            photo_url: null
+        });
+
+        res.status(201).json({ message: 'Candidate added successfully' });
+    } catch (err) {
+        console.error("Error adding candidate:", err);
+        res.status(500).json({ error: 'Failed to add candidate' });
+    }
 });
 
 // Register Voter (with Face Data) - Admin/Legacy
@@ -372,8 +393,8 @@ app.post('/api/registration/submit', async (req, res) => {
 app.get('/api/application/status/:referenceId', async (req, res) => {
     const { referenceId } = req.params;
     try {
-        const { findVoterByReferenceId } = require('./models/Voter'); // lazy import or move top
-        const voter = await findVoterByReferenceId(referenceId);
+        const { findRegistrationByReferenceId } = require('./models/Voter'); // lazy import or move top
+        const voter = await findRegistrationByReferenceId(referenceId);
 
         if (!voter) {
             return res.status(404).json({ error: 'Application not found' });
@@ -884,6 +905,48 @@ app.post('/api/admin/recovery/approve', async (req, res) => {
         res.json({ success: true, message: 'Recovery Request Approved. User can now login.' });
     } catch (err) {
         res.status(500).json({ error: 'Approval Failed' });
+    }
+});
+
+// ==========================================
+// SYS-ADMIN AUTHENTICATION (Distinct from Election Admin)
+// ==========================================
+
+app.post('/api/sys-admin/login', async (req, res) => {
+    const { username, password } = req.body;
+    try {
+        const admin = await findSysAdminByUsername(username);
+        if (!admin || admin.password !== password) {
+            return res.status(401).json({ error: 'Invalid credentials' });
+        }
+
+        res.json({
+            success: true,
+            admin: {
+                id: admin.id,
+                username: admin.username,
+                full_name: admin.full_name,
+                role: 'SYS_ADMIN'
+            }
+        });
+    } catch (err) {
+        console.error(err);
+        res.status(500).json({ error: 'Login failed' });
+    }
+});
+
+app.post('/api/sys-admin/register', async (req, res) => {
+    const { username, password, fullName, email } = req.body;
+    try {
+        if (!username || !password) return res.status(400).json({ error: 'Username/Password required' });
+
+        const existing = await findSysAdminByUsername(username);
+        if (existing) return res.status(400).json({ error: 'Username taken' });
+
+        await createSysAdmin(fullName, email, username, password);
+        res.json({ success: true, message: 'SysAdmin Registered' });
+    } catch (err) {
+        res.status(500).json({ error: 'Registration failed' });
     }
 });
 

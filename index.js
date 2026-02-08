@@ -15,6 +15,7 @@ const { createElectionTable } = require('./models/Election');
 const { createConstituencyTable } = require('./models/Constituency');
 const { createElectoralRollTable } = require('./models/ElectoralRoll');
 const { createRecoveryTable } = require('./models/RecoveryRequest');
+const { createSysAdminTable } = require('./models/SysAdmin');
 
 const PORT = process.env.PORT || 5000;
 
@@ -34,6 +35,7 @@ checkDbConnection().then(async () => {
         await createConstituencyTable();
         await createElectoralRollTable();
         await createRecoveryTable();
+        await createSysAdminTable();
 
         // Seed Observer
         createObserver('observer1', 'securepass', 'Election Observer One');
