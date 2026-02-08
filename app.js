@@ -9,15 +9,14 @@ const app = express();
 app.use(cors());
 app.use(express.json({ limit: '50mb' }));
 
-const { findVoterById, updateVoterFace, createVoter, saveRegistrationDetails, incrementRetry, lockAccount, resetLocks } = require('./models/Voter');
-const { createLog } = require('./models/Log');
+const { findVoterById, updateVoterFace, createVoter, saveRegistrationDetails, incrementRetry, lockAccount, resetLocks, getAllVoters } = require('./models/Voter');
+const { createLog, getAllLogs } = require('./models/Log');
 
 const { getCandidatesByConstituency, getCandidatesByMetadata, createCandidate } = require('./models/Candidate');
 const { findObserverByUsername } = require('./models/Observer');
 const { castVote, getTurnoutStats, getPublicLedger, getAllVotes } = require('./models/Vote');
 
-// NEW MODELS
-const { findAdminByUsername, findAdminByEmail, createAdmin, storeOtp, verifyOtp, updateAdminPassword } = require('./models/Admin');
+const { findAdminByUsername, findAdminByEmail, createAdmin, storeOtp, verifyOtp, updateAdminPassword, getAllAdmins, updateAdmin, deleteAdmin } = require('./models/Admin');
 const { findSysAdminByUsername, createSysAdmin } = require('./models/SysAdmin');
 const { sendOtpEmail } = require('./services/emailService');
 const { getElectionStatus, updateElectionPhase, toggleKillSwitch } = require('./models/Election');
@@ -43,6 +42,62 @@ app.get('/api/election/public-key', async (req, res) => {
     }
 });
 
+// --- AUDIT ROUTES ---
+app.get('/api/audit/logs', async (req, res) => {
+    try {
+        const logs = await getAllLogs();
+        res.json(logs);
+    } catch (err) {
+        console.error("Failed to fetch logs:", err);
+        res.status(500).json({ error: 'Failed to fetch audit logs' });
+    }
+});
+
+app.get('/api/admin/list', async (req, res) => {
+    try {
+        const admins = await getAllAdmins();
+        res.json(admins);
+    } catch (err) {
+        console.error("Failed to fetch admins:", err);
+        res.status(500).json({ error: 'Failed to fetch admins' });
+    }
+});
+
+app.delete('/api/admin/:id', async (req, res) => {
+    try {
+        await deleteAdmin(req.params.id);
+        res.json({ success: true, message: 'Admin deleted successfully' });
+    } catch (err) {
+        console.error("Failed to delete admin:", err);
+        res.status(500).json({ error: 'Failed to delete admin' });
+    }
+});
+
+app.put('/api/admin/:id', async (req, res) => {
+    const { fullName, email, role, password } = req.body;
+    try {
+        const updated = await updateAdmin(req.params.id, fullName, email, role, password);
+        res.json({ success: true, admin: updated });
+    } catch (err) {
+        console.error("Failed to update admin:", err);
+        // Return specific error if meaningful (e.g. unique constraint)
+        if (err.code === '23505') { // Postgres unique_violation
+            return res.status(400).json({ error: 'Email already exists.' });
+        }
+        res.status(500).json({ error: 'Failed to update admin: ' + err.message });
+    }
+});
+
+app.get('/api/admin/voters', async (req, res) => {
+    try {
+        const voters = await getAllVoters();
+        res.json(voters);
+    } catch (err) {
+        console.error("Failed to fetch voters:", err);
+        res.status(500).json({ error: 'Failed to fetch voters' });
+    }
+});
+
 // --- ADMIN ROUTES ---
 
 // Admin Login
@@ -50,19 +105,79 @@ app.post('/api/admin/login', async (req, res) => {
     const { username, password, role } = req.body;
     try {
         const admin = await findAdminByUsername(username);
-        if (!admin) return res.status(401).json({ error: 'Invalid credentials' });
+        if (!admin) {
+            // Log failed login - user not found
+            await createLog({
+                event: 'ADMIN_LOGIN_FAILED',
+                user_id: username,
+                details: { reason: 'User not found', role },
+                ip_address: req.ip
+            });
+            return res.status(401).json({ error: 'Invalid credentials' });
+        }
 
-        if (admin.password !== password) return res.status(401).json({ error: 'Invalid credentials' });
+        if (admin.password !== password) {
+            // Log failed login - wrong password
+            await createLog({
+                event: 'ADMIN_LOGIN_FAILED',
+                user_id: username,
+                details: { reason: 'Invalid password', role },
+                ip_address: req.ip
+            });
+            return res.status(401).json({ error: 'Invalid credentials' });
+        }
 
         // Strict Role Check
-        if (admin.role !== role) return res.status(403).json({ error: `Access Denied: You are not authorized for ${role} role.` });
+        if (admin.role !== role) {
+            // Log failed login - role mismatch
+            await createLog({
+                event: 'ADMIN_LOGIN_FAILED',
+                user_id: username,
+                details: { reason: 'Role mismatch', requested_role: role, actual_role: admin.role },
+                ip_address: req.ip
+            });
+            return res.status(403).json({ error: `Access Denied: You are not authorized for ${role} role.` });
+        }
+
+        // Log successful login
+        await createLog({
+            event: 'ADMIN_LOGIN_SUCCESS',
+            user_id: admin.username,
+            details: { admin_id: admin.id, role: admin.role, name: admin.full_name },
+            ip_address: req.ip
+        });
 
         res.json({ success: true, admin: { id: admin.id, username: admin.username, role: admin.role, name: admin.full_name } });
     } catch (err) {
         console.error(err);
+        // Log system error
+        await createLog({
+            event: 'ADMIN_LOGIN_ERROR',
+            user_id: username,
+            details: { error: err.message },
+            ip_address: req.ip
+        });
         res.status(500).json({ error: 'Login failed' });
     }
 });
+
+// Admin Logout
+app.post('/api/admin/logout', async (req, res) => {
+    const { username, role } = req.body;
+    try {
+        await createLog({
+            event: 'ADMIN_LOGOUT',
+            user_id: username,
+            details: { role },
+            ip_address: req.ip
+        });
+        res.json({ success: true });
+    } catch (err) {
+        console.error('Logout logging failed:', err);
+        res.status(500).json({ error: 'Logout logging failed' });
+    }
+});
+
 
 // Admin Registration
 app.post('/api/admin/register', async (req, res) => {

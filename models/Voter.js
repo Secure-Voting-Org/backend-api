@@ -77,12 +77,6 @@ const createRegistrationTable = async () => {
     await pool.query(query);
 };
 
-// Find Voter by ID
-const findVoterById = async (id) => {
-    const query = 'SELECT * FROM voters WHERE id = $1';
-    const { rows } = await pool.query(query, [id]);
-    return rows[0];
-};
 
 // Find Voter by Reference ID
 const findVoterByReferenceId = async (referenceId) => {
@@ -229,6 +223,16 @@ const updateVoterPassword = async (email, newPassword) => {
     await pool.query(query, [newPassword, email]);
 };
 
+const getAllVoters = async () => {
+    const query = `
+        SELECT id, reference_id, name, surname, constituency, status, 
+               has_voted, retry_count, locked_until, created_at 
+        FROM voters 
+        ORDER BY created_at DESC`;
+    const { rows } = await pool.query(query);
+    return rows;
+};
+
 module.exports = {
     createVoterTable,
     createRegistrationTable,
@@ -246,5 +250,6 @@ module.exports = {
     updateVoterFace,
     incrementRetry,
     lockAccount,
-    resetLocks
+    resetLocks,
+    getAllVoters
 };
