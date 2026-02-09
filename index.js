@@ -2,7 +2,7 @@ const app = require('./app');
 require('dotenv').config();
 
 const { checkDbConnection } = require('./config/db');
-const { createVoterTable, createRegistrationTable, findVoterById, updateVoterFace, createVoter, saveRegistrationDetails } = require('./models/Voter');
+const { createVoterTable, createRegistrationTable, createVoterAuthTable, findVoterById, updateVoterFace, createVoter, saveRegistrationDetails } = require('./models/Voter');
 const { createLogTable, createLog, getAllLogs } = require('./models/Log');
 
 const { createCandidateTable } = require('./models/Candidate');
@@ -24,6 +24,7 @@ checkDbConnection().then(async () => {
     try {
         await createVoterTable();
         await createRegistrationTable();
+        await createVoterAuthTable();
         await createLogTable();
         await createCandidateTable();
         await createObserverTable();
