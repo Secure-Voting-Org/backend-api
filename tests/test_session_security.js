@@ -1,4 +1,4 @@
-const BASE_URL = 'http://localhost:5000/api';
+const BASE_URL = 'http://localhost:5001/api';
 const AUTH_URL = `${BASE_URL}/voter/login`;
 const PROTECTED_URL_TEMPLATE = `${BASE_URL}/voter`; // /api/voter/:id
 

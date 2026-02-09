@@ -1,5 +1,5 @@
-const BASE_URL = 'http://localhost:5000/api/registration/submit';
-const ADMIN_URL = 'http://localhost:5000/api/admin/flagged-registrations';
+const BASE_URL = 'http://localhost:5001/api/registration/submit';
+const ADMIN_URL = 'http://localhost:5001/api/admin/flagged-registrations';
 
 // Mock Data
 const generateAadhaar = () => Math.floor(100000000000 + Math.random() * 900000000000).toString();

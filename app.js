@@ -312,6 +312,27 @@ app.post('/api/p2p/block', async (req, res) => {
     res.json({ success: true, message: 'Block received' });
 });
 
+// 3.5 Integrity Alert Monitoring Endpoint
+app.get('/api/audit/integrity-status', async (req, res) => {
+    try {
+        const BlockchainService = require('./services/BlockchainService');
+        const status = BlockchainService.getIntegrityStatus();
+        if (!status.isValid) {
+            return res.status(500).json({
+                status: 'INTEGRITY_FAILURE',
+                message: status.error,
+                lastChecked: status.lastChecked
+            });
+        }
+        res.json({
+            status: 'HEALTHY',
+            lastChecked: status.lastChecked
+        });
+    } catch (err) {
+        res.status(500).json({ error: 'Failed to fetch integrity status' });
+    }
+});
+
 // Trigger Integrity Check
 app.get('/api/integrity-check', async (req, res) => {
     try {
