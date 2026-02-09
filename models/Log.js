@@ -21,4 +21,19 @@ const createLog = async (logData) => {
     await pool.query(query, [event, user_id, JSON.stringify(details), ip_address]);
 };
 
-module.exports = { createLogTable, createLog };
+// Get All Logs (Read-Only for Auditors)
+const getAllLogs = async (filters = {}) => {
+    let query = 'SELECT * FROM logs ORDER BY created_at DESC';
+    const params = [];
+
+    // Optional filtering by event type or date range
+    if (filters.event) {
+        query = 'SELECT * FROM logs WHERE event = $1 ORDER BY created_at DESC';
+        params.push(filters.event);
+    }
+
+    const { rows } = await pool.query(query, params);
+    return rows;
+};
+
+module.exports = { createLogTable, createLog, getAllLogs };

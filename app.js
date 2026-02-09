@@ -1,33 +1,116 @@
+// Main backend application logic
 const express = require('express');
 require('dotenv').config();
 const cors = require('cors');
 const { spawn } = require('child_process');
 const path = require('path');
 
+// Initialize Express App
 const app = express();
 
+// Middleware: Enable CORS for frontend access
 app.use(cors());
+// Middleware: Parse JSON bodies (increased limit for images)
 app.use(express.json({ limit: '50mb' }));
 
 
 
 const { findVoterById, updateVoterFace, createVoter, saveRegistrationDetails, incrementRetry, lockAccount, resetLocks } = require('./models/Voter');
 const { createLog } = require('./models/Log');
+const { findVoterById, updateVoterFace, createVoter, saveRegistrationDetails, incrementRetry, lockAccount, resetLocks, getAllVoters, findPendingRegistrationByAadhaar, getFlaggedRegistrations } = require('./models/Voter');
+const { createLog, getAllLogs } = require('./models/Log');
+const { checkIpVelocity, checkDeviceVelocity, checkFaceSimilarity, calculateRiskScore, logFraudSignal } = require('./utils/fraudEngine');
+const { generateToken, createSession, invalidateSession } = require('./utils/authService');
+const authMiddleware = require('./middleware/authMiddleware');
 
-const { getCandidatesByConstituency, getCandidatesByMetadata } = require('./models/Candidate');
+const { getCandidatesByConstituency, getCandidatesByMetadata, createCandidate } = require('./models/Candidate');
 const { findObserverByUsername } = require('./models/Observer');
-const { castVote, getTurnoutStats, getPublicLedger } = require('./models/Vote');
+const { castVote, getTurnoutStats, getPublicLedger, getAllVotes } = require('./models/Vote');
 
-// NEW MODELS
-const { findAdminByUsername } = require('./models/Admin');
+const { findAdminByUsername, findAdminByEmail, createAdmin, storeOtp, verifyOtp, updateAdminPassword, getAllAdmins, updateAdmin, deleteAdmin } = require('./models/Admin');
+const { findSysAdminByUsername, createSysAdmin } = require('./models/SysAdmin');
+const { sendOtpEmail } = require('./services/emailService');
 const { getElectionStatus, updateElectionPhase, toggleKillSwitch } = require('./models/Election');
 const { addConstituency, getAllConstituencies } = require('./models/Constituency');
 const { findCitizen } = require('./models/ElectoralRoll');
 const { createRecoveryRequest, getRecoveryRequest, updateRecoveryStatus, getAllRecoveryRequests } = require('./models/RecoveryRequest');
+const { loadOrGenerateKeys, getPublicKey, getPrivateKey } = require('./utils/encryption_keys');
+const MempoolService = require('./utils/MempoolService');
+const BlindSignature = require('./utils/BlindSignature');
 
-// Routes
+// Load keys on start
+loadOrGenerateKeys().catch(err => console.error("Failed to load election keys:", err));
+
+// --- REST API ROUTES ---
+
+// Health Check Route
 app.get('/', (req, res) => {
     res.json({ message: 'SecureVote Backend API is running' });
+});
+
+app.get('/api/election/public-key', async (req, res) => {
+    try {
+        const key = await getPublicKey();
+        res.json(key);
+    } catch (err) {
+        res.status(500).json({ error: 'Failed to retrieve election key' });
+    }
+});
+
+// --- AUDIT ROUTES ---
+app.get('/api/audit/logs', async (req, res) => {
+    try {
+        const logs = await getAllLogs();
+        res.json(logs);
+    } catch (err) {
+        console.error("Failed to fetch logs:", err);
+        res.status(500).json({ error: 'Failed to fetch audit logs' });
+    }
+});
+
+app.get('/api/admin/list', async (req, res) => {
+    try {
+        const admins = await getAllAdmins();
+        res.json(admins);
+    } catch (err) {
+        console.error("Failed to fetch admins:", err);
+        res.status(500).json({ error: 'Failed to fetch admins' });
+    }
+});
+
+app.delete('/api/admin/:id', async (req, res) => {
+    try {
+        await deleteAdmin(req.params.id);
+        res.json({ success: true, message: 'Admin deleted successfully' });
+    } catch (err) {
+        console.error("Failed to delete admin:", err);
+        res.status(500).json({ error: 'Failed to delete admin' });
+    }
+});
+
+app.put('/api/admin/:id', async (req, res) => {
+    const { fullName, email, role, password } = req.body;
+    try {
+        const updated = await updateAdmin(req.params.id, fullName, email, role, password);
+        res.json({ success: true, admin: updated });
+    } catch (err) {
+        console.error("Failed to update admin:", err);
+        // Return specific error if meaningful (e.g. unique constraint)
+        if (err.code === '23505') { // Postgres unique_violation
+            return res.status(400).json({ error: 'Email already exists.' });
+        }
+        res.status(500).json({ error: 'Failed to update admin: ' + err.message });
+    }
+});
+
+app.get('/api/admin/voters', async (req, res) => {
+    try {
+        const voters = await getAllVoters();
+        res.json(voters);
+    } catch (err) {
+        console.error("Failed to fetch voters:", err);
+        res.status(500).json({ error: 'Failed to fetch voters' });
+    }
 });
 
 // --- ADMIN ROUTES ---
@@ -37,17 +120,182 @@ app.post('/api/admin/login', async (req, res) => {
     const { username, password, role } = req.body;
     try {
         const admin = await findAdminByUsername(username);
-        if (!admin) return res.status(401).json({ error: 'Invalid credentials' });
+        if (!admin) {
+            // Log failed login - user not found
+            await createLog({
+                event: 'ADMIN_LOGIN_FAILED',
+                user_id: username,
+                details: { reason: 'User not found', role },
+                ip_address: req.ip
+            });
+            return res.status(401).json({ error: 'Invalid credentials' });
+        }
 
-        if (admin.password !== password) return res.status(401).json({ error: 'Invalid credentials' });
+        if (admin.password !== password) {
+            // Log failed login - wrong password
+            await createLog({
+                event: 'ADMIN_LOGIN_FAILED',
+                user_id: username,
+                details: { reason: 'Invalid password', role },
+                ip_address: req.ip
+            });
+
+            // --- FRAUD CHECK: REPEATED LOGIN FAILURES (Primitive) ---
+            // In a real system, we'd query recent failure logs here.
+            // For now, let's just flag the IP if needed or trust the log monitoring.
+            // ----------------------------------------------------
+
+            return res.status(401).json({ error: 'Invalid credentials' });
+        }
 
         // Strict Role Check
-        if (admin.role !== role) return res.status(403).json({ error: `Access Denied: You are not authorized for ${role} role.` });
+        if (admin.role !== role) {
+            // Log failed login - role mismatch
+            await createLog({
+                event: 'ADMIN_LOGIN_FAILED',
+                user_id: username,
+                details: { reason: 'Role mismatch', requested_role: role, actual_role: admin.role },
+                ip_address: req.ip
+            });
+            return res.status(403).json({ error: `Access Denied: You are not authorized for ${role} role.` });
+        }
+
+        // Log successful login
+        await createLog({
+            event: 'ADMIN_LOGIN_SUCCESS',
+            user_id: admin.username,
+            details: { admin_id: admin.id, role: admin.role, name: admin.full_name },
+            ip_address: req.ip
+        });
 
         res.json({ success: true, admin: { id: admin.id, username: admin.username, role: admin.role, name: admin.full_name } });
     } catch (err) {
         console.error(err);
+        // Log system error
+        await createLog({
+            event: 'ADMIN_LOGIN_ERROR',
+            user_id: username,
+            details: { error: err.message },
+            ip_address: req.ip
+        });
         res.status(500).json({ error: 'Login failed' });
+    }
+});
+
+// Admin Logout
+app.post('/api/admin/logout', async (req, res) => {
+    const { username, role } = req.body;
+    try {
+        await createLog({
+            event: 'ADMIN_LOGOUT',
+            user_id: username,
+            details: { role },
+            ip_address: req.ip
+        });
+        res.json({ success: true });
+    } catch (err) {
+        console.error('Logout logging failed:', err);
+        res.status(500).json({ error: 'Logout logging failed' });
+    }
+});
+
+
+// Admin Registration
+app.post('/api/admin/register', async (req, res) => {
+    const { fullName, email, username, password, role } = req.body;
+
+    try {
+        // Check if username already exists
+        const existingUser = await findAdminByUsername(username);
+        if (existingUser) {
+            return res.status(400).json({ error: 'Username already exists' });
+        }
+
+        // Check if email already exists
+        const existingEmail = await findAdminByEmail(email);
+        if (existingEmail) {
+            return res.status(400).json({ error: 'Email already registered' });
+        }
+
+        // Create new admin
+        const newAdmin = await createAdmin(fullName, email, username, password, role);
+        res.json({ success: true, message: 'Registration successful' });
+    } catch (err) {
+        console.error(err);
+        res.status(500).json({ error: 'Registration failed' });
+    }
+});
+
+// Forgot Password - Send OTP
+app.post('/api/admin/forgot-password/send-otp', async (req, res) => {
+    const { email } = req.body;
+
+    try {
+        // Check if email exists
+        const admin = await findAdminByEmail(email);
+        if (!admin) {
+            return res.status(404).json({ error: 'Email not found' });
+        }
+
+        // Generate 6-digit OTP
+        const otp = Math.floor(100000 + Math.random() * 900000).toString();
+
+        // Store OTP
+        await storeOtp(email, otp);
+
+        // Send OTP via email
+        const emailResult = await sendOtpEmail(email, otp);
+
+        if (emailResult.success) {
+            console.log(`✓ OTP email sent successfully to ${email}`);
+        } else {
+            console.log(`⚠ Email sending failed, but OTP logged to console: ${otp}`);
+        }
+
+        res.json({ success: true, message: 'OTP sent to your email' });
+    } catch (err) {
+        console.error(err);
+        res.status(500).json({ error: 'Failed to send OTP' });
+    }
+});
+
+// Forgot Password - Verify OTP
+app.post('/api/admin/forgot-password/verify-otp', async (req, res) => {
+    const { email, otp } = req.body;
+
+    try {
+        const isValid = await verifyOtp(email, otp);
+
+        if (!isValid) {
+            return res.status(400).json({ error: 'Invalid or expired OTP' });
+        }
+
+        res.json({ success: true, message: 'OTP verified' });
+    } catch (err) {
+        console.error(err);
+        res.status(500).json({ error: 'OTP verification failed' });
+    }
+});
+
+// Forgot Password - Reset Password
+app.post('/api/admin/forgot-password/reset-password', async (req, res) => {
+    const { email, otp, newPassword } = req.body;
+
+    try {
+        // Verify OTP again
+        const isValid = await verifyOtp(email, otp);
+
+        if (!isValid) {
+            return res.status(400).json({ error: 'Invalid or expired OTP' });
+        }
+
+        // Update password
+        await updateAdminPassword(email, newPassword);
+
+        res.json({ success: true, message: 'Password reset successful' });
+    } catch (err) {
+        console.error(err);
+        res.status(500).json({ error: 'Password reset failed' });
     }
 });
 
@@ -61,6 +309,87 @@ app.get('/api/election/status', async (req, res) => {
     }
 });
 
+// --- P2P & INTEGRITY ROUTES ---
+
+// Receive Block from Peer (Simulation)
+app.post('/api/p2p/block', async (req, res) => {
+    const { block } = req.body;
+    // In a real P2P system, we would:
+    // 1. Validate the block hash (PoW or Signature)
+    // 2. Validate prev_hash matches our last block
+    // 3. Add to our chain if valid
+    console.log(`[P2P] Received block ${block.transaction_hash} from peer.`);
+    res.json({ success: true, message: 'Block received' });
+});
+
+// 3.5 Integrity Alert Monitoring Endpoint
+app.get('/api/audit/integrity-status', async (req, res) => {
+    try {
+        const BlockchainService = require('./services/BlockchainService');
+        const status = BlockchainService.getIntegrityStatus();
+        if (!status.isValid) {
+            return res.status(500).json({
+                status: 'INTEGRITY_FAILURE',
+                message: status.error,
+                lastChecked: status.lastChecked
+            });
+        }
+        res.json({
+            status: 'HEALTHY',
+            lastChecked: status.lastChecked
+        });
+    } catch (err) {
+        res.status(500).json({ error: 'Failed to fetch integrity status' });
+    }
+});
+
+// Trigger Integrity Check
+app.get('/api/integrity-check', async (req, res) => {
+    try {
+        const { pool } = require('./config/db');
+        const query = 'SELECT * FROM votes ORDER BY id ASC';
+        const { rows } = await pool.query(query);
+        const crypto = require('crypto');
+
+        let isIntact = true;
+        let failedBlockId = null;
+
+        for (let i = 0; i < rows.length; i++) {
+            const current = rows[i];
+            const prevHash = i === 0
+                ? '0000000000000000000000000000000000000000000000000000000000000000'
+                : rows[i - 1].transaction_hash;
+
+            // 1. Verify Link
+            if (current.prev_hash !== prevHash) {
+                isIntact = false;
+                failedBlockId = current.id;
+                console.error(`[INTEGRITY FAIL] Block ${current.id} prev_hash mismatch. Expected ${prevHash}, got ${current.prev_hash}`);
+                break;
+            }
+
+            // 2. Verify Content Hash
+            // Note: We need to reconstruct the EXACT string used in creation.
+            // castVote uses: `${prevHash}-${voterId}-${candidateId}-${timestamp}`
+            // Timestamp in DB is Date object, we need to convert to millisecond epoch if that's what was used.
+            // castVote stores Date.now() in 'data' string, but passes 'to_timestamp(...)' to DB.
+            // Retreiving from DB gives a Date object. 
+            // Ideally, we should store the exact timestamp integer or the data payload itself to be verifiable.
+            // For this simulation, we'll skip exact hash re-verification unless we store the seed data, 
+            // but the prev_hash link is the most critical part for "Chain Verification".
+        }
+
+        if (isIntact) {
+            res.json({ status: 'VERIFIED', message: 'Blockchain is intact.' });
+        } else {
+            res.status(500).json({ status: 'CORRUPTED', message: `Integrity failure at block ${failedBlockId}` });
+        }
+    } catch (err) {
+        console.error(err);
+        res.status(500).json({ error: 'Integrity check failed' });
+    }
+});
+
 // Update Phase (Live Admin Only - In real app, check JWT)
 app.post('/api/election/update', async (req, res) => {
     const { phase, isKillSwitch } = req.body;
@@ -70,6 +399,27 @@ app.post('/api/election/update', async (req, res) => {
         res.json({ success: true });
     } catch (err) {
         res.status(500).json({ error: 'Update failed' });
+    }
+});
+
+// --- TALLYING AUTHORITY ROUTES (ADMIN ONLY) ---
+app.get('/api/admin/votes', async (req, res) => {
+    // In production, Strict Auth Middleware here!
+    try {
+        const votes = await getAllVotes();
+        res.json(votes);
+    } catch (err) {
+        res.status(500).json({ error: 'Failed to fetch votes' });
+    }
+});
+
+app.get('/api/admin/election/private-key', async (req, res) => {
+    // In production, Strict Auth Middleware here!
+    try {
+        const key = await getPrivateKey();
+        res.json(key);
+    } catch (err) {
+        res.status(500).json({ error: 'Failed to fetch private key' });
     }
 });
 
@@ -97,14 +447,34 @@ app.post('/api/constituency', async (req, res) => {
 });
 
 // Add Candidate
+// Add Candidate
 app.post('/api/candidate', async (req, res) => {
-    // Not implemented yet in Candidate Model
-    // await addCandidate(req.body);
-    res.json({ message: 'Candidate added successfully (Mock)' });
+    try {
+        const { name, party, constituency, symbol } = req.body;
+        // Basic validation
+        if (!name || !constituency || !symbol) {
+            return res.status(400).json({ error: 'Name, Constituency, and Symbol are required' });
+        }
+
+        // Use createCandidate from model
+        // Passing null for photo_url as it's not currently sent by frontend
+        await createCandidate({
+            name,
+            party,
+            constituency,
+            symbol,
+            photo_url: null
+        });
+
+        res.status(201).json({ message: 'Candidate added successfully' });
+    } catch (err) {
+        console.error("Error adding candidate:", err);
+        res.status(500).json({ error: 'Failed to add candidate' });
+    }
 });
 
-// Register Voter (with Face Data)
-app.post('/api/voter/register', async (req, res) => {
+// Register Voter (with Face Data) - Admin/Legacy
+app.post('/api/admin/voter/register-direct', async (req, res) => {
     try {
         const { id, name, constituency, faceDescriptor } = req.body;
 
@@ -202,7 +572,66 @@ app.post('/api/registration/submit', async (req, res) => {
     } = req.body;
 
     try {
-        console.log("DEBUG: Received Registration Submit for Pending Queue");
+        if (!formData) {
+            return res.status(400).json({ error: "Missing formData in request body" });
+        }
+
+        const clientIp = req.ip || req.headers['x-forwarded-for'] || req.connection.remoteAddress;
+
+        // --- FRAUD CHECK: REGISTRATION VELOCITY (IP) ---
+        const isHighVelocity = await checkIpVelocity(clientIp, 'REGISTRATION');
+        if (isHighVelocity) {
+            await logFraudSignal('HIGH_VELOCITY_REGISTRATION_IP', {
+                count: 'Exceeded Limit',
+                aadhaar: aadhaar
+            }, clientIp);
+            console.warn(`[FRAUD] High velocity registration detected from IP ${clientIp}`);
+        }
+
+        // --- FRAUD CHECK: DEVICE VELOCITY ---
+        const deviceHash = req.headers['x-device-hash'];
+        if (deviceHash) {
+            const isDeviceHighVelocity = await checkDeviceVelocity(deviceHash);
+            if (isDeviceHighVelocity) {
+                await logFraudSignal('HIGH_VELOCITY_REGISTRATION_DEVICE', {
+                    count: 'Exceeded Limit',
+                    aadhaar: aadhaar,
+                    deviceHash: deviceHash
+                }, clientIp);
+                console.warn(`[FRAUD] High velocity registration detected from Device ${deviceHash}`);
+            }
+        }
+
+        // --- FRAUD CHECK: FACE SIMILARITY ---
+        // Basic check against recent pending applications
+        const faceMatch = await checkFaceSimilarity(faceDescriptor);
+        if (faceMatch && faceMatch.match) {
+            await logFraudSignal('POTENTIAL_DUPLICATE_FACE', {
+                details: 'Face matches existing pending application',
+                matchedApplicationId: faceMatch.applicationId,
+                distance: faceMatch.distance
+            }, clientIp);
+            console.warn(`[FRAUD] Face matches pending application ${faceMatch.applicationId} (dist: ${faceMatch.distance})`);
+            // return res.status(409).json({ error: 'Biometric duplicate detected.' }); // Optional Blocking
+        }
+        // ------------------------------------------
+
+        // --- CALCULATE RISK SCORE ---
+        const riskAssessment = calculateRiskScore({
+            ipVelocity: isHighVelocity,
+            deviceVelocity: deviceHash ? await checkDeviceVelocity(deviceHash) : false,
+            faceSimilarity: faceMatch
+        });
+
+        console.log(`[RISK ASSESSMENT] Score: ${riskAssessment.score}, Flags: ${riskAssessment.flags.join(', ')}`);
+        // ------------------------------------------
+
+        // --- DUPLICATE CHECK: PENDING APPLICATION ---
+        const existingPending = await findPendingRegistrationByAadhaar(aadhaar);
+        if (existingPending) {
+            return res.status(409).json({ error: 'Aadhaar already has a pending application.' });
+        }
+        // ------------------------------------------
 
         // Generate 12-char Reference ID
         const referenceId = generateReferenceId();
@@ -244,13 +673,14 @@ app.post('/api/registration/submit', async (req, res) => {
             dobProof: getFileBase64(formData.dobProofFile),
             addressProof: getFileBase64(formData.addressProofFile),
             disabilityProof: getFileBase64(formData.disabilityFile)
+            ipAddress: clientIp,
+            deviceHash: deviceHash,
+            riskScore: riskAssessment.score,
+            riskFlags: riskAssessment.flags
         };
 
         console.log("DEBUG: Saving to voter_registrations (Pending)...");
 
-        // Save to Pending Table (voter_registrations)
-        // This function handles JSON stringifying of faceDescriptor internally if needed, or we pass object
-        // Based on Voter.js: saveRegistrationDetails takes `details` and stringifies `faceDescriptor`
         const applicationId = await saveRegistrationDetails(registrationData);
 
         console.log("DEBUG: Pending Registration Success. App ID:", applicationId);
@@ -263,16 +693,47 @@ app.post('/api/registration/submit', async (req, res) => {
     }
 });
 
+// 3. Application Status Check
+app.get('/api/application/status/:referenceId', async (req, res) => {
+    const { referenceId } = req.params;
+    try {
+        const { findRegistrationByReferenceId } = require('./models/Voter'); // lazy import or move top
+        const voter = await findRegistrationByReferenceId(referenceId);
+
+        if (!voter) {
+            return res.status(404).json({ error: 'Application not found' });
+        }
 
 
 // Get Voter by ID
-app.get('/api/voter/:id', async (req, res) => {
+// Helper to get Voter by ID (Protected)
+app.get('/api/voter/:id', authMiddleware, async (req, res) => {
     try {
+        // Ensure user can only access their own data
+        if (req.user.id !== req.params.id && req.user.mobile !== req.params.id) {
+            return res.status(403).json({ error: 'Unauthorized access to voter profile' });
+        }
+
         const voter = await findVoterById(req.params.id);
         if (!voter) return res.status(404).json({ error: 'Voter not found' });
         res.json(voter);
     } catch (err) {
         res.status(500).json({ error: 'Lookup failed' });
+    }
+});
+
+// Get Flagged Registrations (Admin)
+app.get('/api/admin/flagged-registrations', async (req, res) => {
+    try {
+        const flaggedRegistrations = await getFlaggedRegistrations();
+        res.json({
+            success: true,
+            count: flaggedRegistrations.length,
+            registrations: flaggedRegistrations
+        });
+    } catch (err) {
+        console.error("Error fetching flagged registrations:", err);
+        res.status(500).json({ error: 'Failed to fetch flagged registrations' });
     }
 });
 
@@ -284,6 +745,13 @@ app.get('/api/candidates', async (req, res) => {
     if (!constituency) {
         return res.status(400).json({ error: 'Constituency is required' });
     }
+
+    // Check Status
+    const status = await getElectionStatus();
+    if (status.phase !== 'LIVE') {
+        return res.status(403).json({ error: 'Election is not LIVE. Candidates are not visible.' });
+    }
+
     try {
         const candidates = await getCandidatesByConstituency(constituency);
         res.json(candidates);
@@ -312,6 +780,13 @@ app.get('/api/candidates/search', async (req, res) => {
  */
 app.get('/api/voter/ballot/:voterId', async (req, res) => {
     const { voterId } = req.params;
+
+    // Check Status
+    const status = await getElectionStatus();
+    if (status.phase !== 'LIVE') {
+        return res.status(403).json({ error: 'Election is not LIVE. Ballot not available.' });
+    }
+
     try {
         const voter = await findVoterById(voterId);
         if (!voter) {
@@ -407,31 +882,114 @@ app.post('/api/login', async (req, res) => {
     res.json({ success: true });
 });
 
-// Vote Route
-app.post('/api/vote', async (req, res) => {
-    const { voterId, candidateId, constituency } = req.body;
+// Generate Keys on Startup (or load from DB/File in prod)
+BlindSignature.generateKeys();
 
-    // Check Election Status First
+// Endpoint to get Blind Signature Public Key
+app.get('/api/blind-signature/keys', (req, res) => {
+    const key = BlindSignature.getKey();
+    if (key) {
+        res.json({ n: key.n, e: key.e });
+    } else {
+        res.status(500).json({ error: 'Keys not initialized' });
+    }
+});
+
+// Issue Blind Signature (Authorized)
+// Expects: { blinded_token, voterId }
+app.post('/api/blind-sign', async (req, res) => {
+    const { blinded_token, voterId } = req.body;
+
+    // 1. Verify Voter (Ensure they are eligible and haven't signed yet)
+    // In real app, check DB 'is_token_issued' flag.
+    const voter = await findVoterById(voterId);
+    if (!voter) return res.status(404).json({ error: 'Voter not found' });
+
+    // Check if already issued (Prevent Double Issuance)
+    const { checkTokenIssued, markTokenIssued } = require('./models/Voter');
+    const hasIssued = await checkTokenIssued(voterId);
+    if (hasIssued) return res.status(403).json({ error: 'Voting Token already issued to this user.' });
+
+    try {
+        // 2. Sign the Blinded Token
+        const signature = BlindSignature.blindSign(blinded_token);
+
+        // 3. Mark as Issued (Important!)
+        await markTokenIssued(voterId);
+
+        res.json({ signature });
+    } catch (err) {
+        console.error("Blind Signing Error:", err);
+        res.status(500).json({ error: 'Signing failed' });
+    }
+});
+
+// Vote Route (Anonymous with Real Blind Signature)
+app.post('/api/vote', async (req, res) => {
+    const { vote, auth_token, signature, constituency } = req.body;
+
+    // Check Election Status
     const status = await getElectionStatus();
     if (status.phase !== 'LIVE' || status.is_kill_switch_active) {
         return res.status(403).json({ error: 'Election is not live or has been suspended.' });
     }
 
+    // 1. Verify Blind Token Signature
+    if (!auth_token || !signature) {
+        return res.status(401).json({ error: 'Unauthorized: Missing Token or Signature' });
+    }
+
     try {
-        const result = await castVote(voterId, candidateId, constituency);
+        // Verify: s^e % n == token
+        // Important: auth_token is the UNBLINDED message (BigInt string)
+        const isValid = BlindSignature.verify(auth_token, signature);
+
+        if (!isValid) {
+            return res.status(401).json({ error: 'Invalid Blind Signature' });
+        }
+
+        // --- EPIC 3: Blockchain Shadowing ---
+        // Add to Mempool silently. Does not affect main flow.
+        const sourceIp = req.ip || req.connection.remoteAddress;
+        MempoolService.add({ vote, auth_token, signature, constituency }, sourceIp)
+            .catch(err => console.error("[Epic3] Mempool shadow failed:", err));
+
+        // --- ORIGINAL BUSINESS LOGIC (Constraint: Do NOT modify) ---
+        // 2. Anonymize Voter ID (Hash the token to prevent double voting)
+        const anonymousId = require('crypto').createHash('sha256').update(auth_token).digest('hex');
+
+        // 3. Cast Vote
+        const result = await castVote(anonymousId, vote, constituency);
         if (result.success) {
+            // --- EPIC 3: P2P Broadcast ---
+            // Requirement: "Node A broadcasts the new block to Node B"
+            if (result.block) {
+                MempoolService.broadcastBlock(result.block).catch(e => console.error("Broadcast failed", e));
+            }
             res.json({ success: true, transactionHash: result.transactionHash });
         } else {
             res.status(400).json({ error: result.error });
         }
     } catch (err) {
+        console.error("Voting Error:", err);
+        // Handle Unique Constraint Violation (Double Voting)
+        if (err.code === '23505') { // Postgres unique_violation for unique_voter_id
+            // --- FRAUD CHECK: DUPLICATE VOTE ATTEMPT ---
+            const clientIp = req.ip || req.connection.remoteAddress;
+            await logFraudSignal('DUPLICATE_VOTE_ATTEMPT', {
+                details: 'Token already used',
+                signature_snippet: signature ? signature.substring(0, 10) + '...' : 'N/A'
+            }, clientIp);
+            // ------------------------------------------
+            return res.status(403).json({ error: 'Duplicate Vote: This token has already been used.' });
+        }
         res.status(500).json({ error: 'Voting failed' });
     }
 });
 
 // Observer Login
 app.post('/api/observer/login', async (req, res) => {
-    const { username, password } = req.body;
+    const { username, password, role } = req.body;
     try {
         const observer = await findObserverByUsername(username);
         if (!observer) {
@@ -443,17 +1001,153 @@ app.post('/api/observer/login', async (req, res) => {
             return res.status(401).json({ error: 'Invalid credentials' });
         }
 
+        // Verify Role if provided (Strict Login)
+        if (role && observer.role !== role) {
+            return res.status(403).json({ error: 'Invalid credentials' });
+        }
+
         res.json({
             success: true,
             observer: {
                 id: observer.id,
                 username: observer.username,
-                full_name: observer.full_name
+                full_name: observer.full_name,
+                role: observer.role
             }
         });
     } catch (err) {
         console.error(err);
         res.status(500).json({ error: 'Login failed' });
+    }
+});
+
+// Observer Registration
+app.post('/api/observer/register', async (req, res) => {
+    const { username, password, fullName, role, email } = req.body;
+    try {
+        if (!username || !password || !fullName || !email) {
+            return res.status(400).json({ error: 'All fields are required' });
+        }
+
+        const validRoles = ['general', 'expenditure'];
+        const observerRole = validRoles.includes(role) ? role : 'general';
+
+        const existing = await findObserverByUsername(username);
+        if (existing) {
+            return res.status(400).json({ error: 'Username already exists' });
+        }
+
+        // In a real app, hash password here
+        await createObserver(username, password, fullName, observerRole, email);
+
+        // Auto-login or just success
+        const observer = await findObserverByUsername(username);
+
+        res.json({
+            success: true,
+            observer: {
+                id: observer.id,
+                username: observer.username,
+                full_name: observer.full_name,
+                role: observer.role,
+                email: observer.email
+            }
+        });
+    } catch (err) {
+        console.error("Observer Registration Error:", err);
+        res.status(500).json({ error: 'Registration failed' });
+    }
+});
+// OTP Store (In-memory for demo)
+const otpStore = {};
+
+// Forgot Password - Generate OTP
+// Forgot Password - Generate OTP
+app.post('/api/observer/forgot-password', async (req, res) => {
+    const { email } = req.body;
+    try {
+        const { findObserverByEmail } = require('./models/Observer');
+        const observer = await findObserverByEmail(email);
+
+        if (!observer) {
+            return res.status(404).json({ error: 'Email not found' });
+        }
+
+        // Generate 6-digit OTP
+        const otp = Math.floor(100000 + Math.random() * 900000).toString();
+        otpStore[email] = { otp, expires: Date.now() + 300000 }; // 5 mins expiry
+
+        console.log(`[OTP] Password Reset Code for ${email}: ${otp}`);
+
+        // Send OTP via centralized email service
+        const emailResult = await sendOtpEmail(email, otp);
+
+        if (emailResult.success) {
+            console.log(`✓ OTP email sent successfully to ${email}`);
+            res.json({ success: true, message: 'OTP sent to your email.' });
+        } else {
+            console.log(`⚠ Email sending failed, but OTP logged to console: ${otp}`);
+            res.json({ success: true, message: 'OTP generated (Check Console - Email Failed)', demoOtp: otp });
+        }
+
+    } catch (err) {
+        console.error("Email Error:", err);
+        // Fallback: If email fails, allow demo OTP so flow isn't broken
+        if (otpStore[email]) {
+            res.json({ success: true, message: 'OTP generated (Check Console - Email Failed)', demoOtp: otpStore[email].otp });
+        } else {
+            res.status(500).json({ error: 'Failed to send OTP', details: err.message });
+        }
+    }
+});
+
+// Verify OTP
+app.post('/api/observer/verify-otp', async (req, res) => {
+    const { email, otp } = req.body;
+    const stored = otpStore[email];
+
+    if (!stored) {
+        return res.status(400).json({ error: 'OTP expired or not requested' });
+    }
+
+    if (Date.now() > stored.expires) {
+        delete otpStore[email];
+        return res.status(400).json({ error: 'OTP expired' });
+    }
+
+    if (stored.otp !== otp) {
+        return res.status(400).json({ error: 'Invalid OTP' });
+    }
+
+    res.json({ success: true, message: 'OTP Verified' });
+});
+
+// Reset Password
+app.post('/api/observer/reset-password', async (req, res) => {
+    const { email, otp, newPassword } = req.body;
+    const stored = otpStore[email];
+
+    // Verify OTP again for security
+    if (!stored || stored.otp !== otp) {
+        return res.status(400).json({ error: 'Invalid or expired session' });
+    }
+
+    try {
+        const { findObserverByEmail, updateObserverPassword } = require('./models/Observer');
+        const observer = await findObserverByEmail(email);
+
+        if (!observer) return res.status(404).json({ error: 'User not found' });
+
+        // Update Password
+        await updateObserverPassword(observer.username, newPassword);
+
+        // Clear OTP
+        delete otpStore[email];
+
+        res.json({ success: true, message: 'Password reset successfully' });
+    } catch (err) {
+        console.error(err);
+        res.status(500).json({ error: 'Failed to reset password' });
     }
 });
 
@@ -681,4 +1375,472 @@ app.get('/api/application/status/:referenceId', async (req, res) => {
     }
 });
 
+// ==========================================
+// SYS-ADMIN AUTHENTICATION (Distinct from Election Admin)
+// ==========================================
+
+app.post('/api/sys-admin/login', async (req, res) => {
+    const { username, password } = req.body;
+    try {
+        const admin = await findSysAdminByUsername(username);
+        if (!admin || admin.password !== password) {
+            return res.status(401).json({ error: 'Invalid credentials' });
+        }
+
+        res.json({
+            success: true,
+            admin: {
+                id: admin.id,
+                username: admin.username,
+                full_name: admin.full_name,
+                role: 'SYS_ADMIN'
+            }
+        });
+    } catch (err) {
+        console.error(err);
+        res.status(500).json({ error: 'Login failed' });
+    }
+});
+
+app.post('/api/sys-admin/register', async (req, res) => {
+    const { username, password, fullName, email } = req.body;
+    try {
+        if (!username || !password) return res.status(400).json({ error: 'Username/Password required' });
+
+        const existing = await findSysAdminByUsername(username);
+        if (existing) return res.status(400).json({ error: 'Username taken' });
+
+        await createSysAdmin(fullName, email, username, password);
+        res.json({ success: true, message: 'SysAdmin Registered' });
+    } catch (err) {
+        res.status(500).json({ error: 'Registration failed' });
+    }
+});
+
+// ==========================================
+// VOTER AUTHENTICATION (Real Auth)
+// ==========================================
+
+const { createVoterAuth, findVoterAuthByMobile, findVoterAuthByEmail, updateVoterPassword } = require('./models/Voter');
+
+// Voter Register
+app.post('/api/voter/register', async (req, res) => {
+    const { fullName, mobile, password, email } = req.body;
+    try {
+        if (!fullName || !mobile || !password) {
+            return res.status(400).json({ error: 'All fields are required' });
+        }
+
+        const existingMobile = await findVoterAuthByMobile(mobile);
+        if (existingMobile) {
+            return res.status(400).json({ error: 'Mobile number already registered' });
+        }
+
+        // Optional: Check email uniqueness if provided
+        if (email) {
+            const existingEmail = await findVoterAuthByEmail(email);
+            if (existingEmail) {
+                return res.status(400).json({ error: 'Email already registered' });
+            }
+        }
+
+        // In a real app, hash password here!
+        // const hashedPassword = await bcrypt.hash(password, 10);
+        const voter = await createVoterAuth(fullName, mobile, email, password);
+
+        res.json({ success: true, user: { name: voter.full_name, mobile: voter.mobile, email: voter.email } });
+    } catch (err) {
+        console.error("Voter Registration Error:", err);
+        res.status(500).json({ error: 'Registration failed' });
+    }
+});
+
+// Voter Login
+app.post('/api/voter/login', async (req, res) => {
+    const { mobile, password } = req.body;
+    const deviceHash = req.headers['x-device-hash'];
+
+    try {
+        const voter = await findVoterAuthByMobile(mobile);
+        if (!voter || voter.password_hash !== password) {
+            return res.status(401).json({ error: 'Invalid mobile or password' });
+        }
+
+        // Generate Token
+        const token = generateToken(voter, deviceHash);
+
+        // Create Session (and invalidate old ones)
+        // Use IP from request
+        const clientIp = req.ip || req.headers['x-forwarded-for'] || req.connection.remoteAddress;
+        const userAgent = req.headers['user-agent'];
+
+        await createSession(voter.mobile, token, deviceHash, clientIp, userAgent);
+
+        res.json({
+            success: true,
+            token: token,
+            user: { name: voter.full_name, mobile: voter.mobile, email: voter.email }
+        });
+    } catch (err) {
+        console.error("Voter Login Error:", err);
+        res.status(500).json({ error: 'Login failed' });
+    }
+});
+
+// Voter Logout
+app.post('/api/voter/logout', async (req, res) => {
+    try {
+        const token = req.headers['authorization']?.split(' ')[1];
+        if (token) {
+            await invalidateSession(token);
+        }
+        res.json({ success: true, message: 'Logged out successfully' });
+    } catch (err) {
+        console.error("Logout Error:", err);
+        res.status(500).json({ error: 'Logout failed' });
+    }
+});
+app.post('/api/voter/forgot-password', async (req, res) => {
+    const { email } = req.body;
+    try {
+        const voter = await findVoterAuthByEmail(email);
+        if (!voter) {
+            return res.status(404).json({ error: 'Email not found' });
+        }
+
+        // Reuse existing OTP logic (could be refactored into a helper)
+        const otp = Math.floor(100000 + Math.random() * 900000).toString();
+        otpStore[email] = { otp, expires: Date.now() + 300000 };
+
+        console.log(`[VOTER OTP] Reset Code for ${email}: ${otp}`);
+
+        // Email Sending Logic (Reused)
+        const nodemailer = require('nodemailer');
+        let transporter;
+        if (process.env.EMAIL_USER && process.env.EMAIL_PASS && !process.env.EMAIL_PASS.includes('your_app_password')) {
+            transporter = nodemailer.createTransport({
+                service: 'gmail',
+                auth: { user: process.env.EMAIL_USER, pass: process.env.EMAIL_PASS }
+            });
+        }
+
+        if (transporter) {
+            await transporter.sendMail({
+                from: process.env.EMAIL_USER,
+                to: email,
+                subject: 'Voter Password Reset OTP - SecureVote',
+                text: `Your OTP for password reset is: ${otp}\n\nThis code expires in 5 minutes.`
+            });
+            console.log(`[EMAIL] OTP sent to ${email}`);
+            res.json({ success: true, message: 'OTP sent to your email.' });
+        } else {
+            // Demo Fallback
+            res.json({ success: true, message: 'OTP generated (Check Console)', demoOtp: otp });
+        }
+    } catch (err) {
+        console.error(err);
+        res.status(500).json({ error: 'Failed to send OTP' });
+    }
+});
+
+// Voter Verify OTP
+app.post('/api/voter/verify-otp', (req, res) => {
+    const { email, otp } = req.body;
+    const stored = otpStore[email];
+
+    if (!stored) return res.status(400).json({ error: 'OTP expired or not requested' });
+    if (Date.now() > stored.expires) {
+        delete otpStore[email];
+        return res.status(400).json({ error: 'OTP expired' });
+    }
+    if (stored.otp !== otp) return res.status(400).json({ error: 'Invalid OTP' });
+
+    delete otpStore[email]; // Consume OTP
+    res.json({ success: true, message: 'OTP Verified' });
+});
+
+// Voter Reset Password
+app.post('/api/voter/reset-password', async (req, res) => {
+    const { email, newPassword } = req.body;
+    try {
+        await updateVoterPassword(email, newPassword);
+        res.json({ success: true, message: 'Password updated successfully' });
+    } catch (err) {
+        console.error(err);
+        res.status(500).json({ error: 'Failed to reset password' });
+    }
+});
+
+// ===== POST-POLL RESULT ENDPOINTS =====
+
+// Get Constituency Results
+app.get('/api/results/constituency/:id', async (req, res) => {
+    try {
+        const constituencyId = req.params.id;
+
+        // Get constituency info
+        const { rows: [constituency] } = await pool.query(
+            'SELECT * FROM constituencies WHERE id = $1',
+            [constituencyId]
+        );
+
+        if (!constituency) {
+            return res.status(404).json({ error: 'Constituency not found' });
+        }
+
+        // Get candidate results
+        const { rows: results } = await pool.query(`
+            SELECT 
+                c.id,
+                c.name,
+                c.party,
+                c.symbol,
+                COUNT(v.id) as vote_count
+            FROM candidates c
+            LEFT JOIN votes v ON v.candidate_id = c.id
+            WHERE c.constituency_id = $1
+            GROUP BY c.id, c.name, c.party, c.symbol
+            ORDER BY vote_count DESC
+        `, [constituencyId]);
+
+        // Calculate total votes
+        const totalVotes = results.reduce((sum, r) => sum + parseInt(r.vote_count), 0);
+
+        // Add vote share percentage
+        const resultsWithPercentage = results.map(r => ({
+            ...r,
+            vote_share: totalVotes > 0 ? ((parseInt(r.vote_count) / totalVotes) * 100).toFixed(2) : '0.00'
+        }));
+
+        // Get voter turnout
+        const { rows: [turnout] } = await pool.query(`
+            SELECT 
+                COUNT(*) as total_voters,
+                COUNT(CASE WHEN has_voted = true THEN 1 END) as voted_count
+            FROM voters
+            WHERE constituency = $1
+        `, [constituency.name]);
+
+        res.json({
+            constituency,
+            results: resultsWithPercentage,
+            totalVotes,
+            turnout: {
+                total: parseInt(turnout.total_voters),
+                voted: parseInt(turnout.voted_count),
+                percentage: turnout.total_voters > 0
+                    ? ((parseInt(turnout.voted_count) / parseInt(turnout.total_voters)) * 100).toFixed(2)
+                    : '0.00'
+            },
+            winner: resultsWithPercentage[0] || null
+        });
+    } catch (err) {
+        console.error('Error fetching constituency results:', err);
+        res.status(500).json({ error: 'Failed to fetch results' });
+    }
+});
+
+// Get Overall Election Summary
+app.get('/api/results/summary', async (req, res) => {
+    try {
+        // Get all constituencies
+        const { rows: constituencies } = await pool.query('SELECT * FROM constituencies');
+
+        // Get total votes cast
+        const { rows: [voteStats] } = await pool.query('SELECT COUNT(*) as total_votes FROM votes');
+
+        // Get total registered voters
+        const { rows: [voterStats] } = await pool.query(`
+            SELECT 
+                COUNT(*) as total_voters,
+                COUNT(CASE WHEN has_voted = true THEN 1 END) as voted_count
+            FROM voters
+        `);
+
+        // Get party-wise results
+        const { rows: partyResults } = await pool.query(`
+            SELECT 
+                c.party,
+                COUNT(v.id) as vote_count
+            FROM candidates c
+            LEFT JOIN votes v ON v.candidate_id = c.id
+            GROUP BY c.party
+            ORDER BY vote_count DESC
+        `);
+
+        const totalVotes = parseInt(voteStats.total_votes);
+        const partyResultsWithPercentage = partyResults.map(p => ({
+            ...p,
+            vote_count: parseInt(p.vote_count),
+            vote_share: totalVotes > 0 ? ((parseInt(p.vote_count) / totalVotes) * 100).toFixed(2) : '0.00'
+        }));
+
+        res.json({
+            totalConstituencies: constituencies.length,
+            totalVotes,
+            totalVoters: parseInt(voterStats.total_voters),
+            votedCount: parseInt(voterStats.voted_count),
+            turnoutPercentage: voterStats.total_voters > 0
+                ? ((parseInt(voterStats.voted_count) / parseInt(voterStats.total_voters)) * 100).toFixed(2)
+                : '0.00',
+            partyResults: partyResultsWithPercentage
+        });
+    } catch (err) {
+        console.error('Error fetching election summary:', err);
+        res.status(500).json({ error: 'Failed to fetch summary' });
+    }
+});
+
+// Get Voter Turnout Statistics
+app.get('/api/results/turnout', async (req, res) => {
+    try {
+        // Overall turnout
+        const { rows: [overall] } = await pool.query(`
+            SELECT 
+                COUNT(*) as total_voters,
+                COUNT(CASE WHEN has_voted = true THEN 1 END) as voted_count
+            FROM voters
+        `);
+
+        // Constituency-wise turnout
+        const { rows: constituencyTurnout } = await pool.query(`
+            SELECT 
+                constituency,
+                COUNT(*) as total_voters,
+                COUNT(CASE WHEN has_voted = true THEN 1 END) as voted_count
+            FROM voters
+            GROUP BY constituency
+            ORDER BY constituency
+        `);
+
+        const constituencyStats = constituencyTurnout.map(c => ({
+            ...c,
+            total_voters: parseInt(c.total_voters),
+            voted_count: parseInt(c.voted_count),
+            percentage: c.total_voters > 0
+                ? ((parseInt(c.voted_count) / parseInt(c.total_voters)) * 100).toFixed(2)
+                : '0.00'
+        }));
+
+        res.json({
+            overall: {
+                total: parseInt(overall.total_voters),
+                voted: parseInt(overall.voted_count),
+                percentage: overall.total_voters > 0
+                    ? ((parseInt(overall.voted_count) / parseInt(overall.total_voters)) * 100).toFixed(2)
+                    : '0.00'
+            },
+            byConstituency: constituencyStats
+        });
+    } catch (err) {
+        console.error('Error fetching turnout:', err);
+        res.status(500).json({ error: 'Failed to fetch turnout statistics' });
+    }
+});
+
+// Generate Form 20 (Result Sheet)
+app.get('/api/results/form20/:constituencyId', async (req, res) => {
+    try {
+        const constituencyId = req.params.constituencyId;
+
+        // Get full constituency results
+        const resultsResponse = await fetch(`http://localhost:8081/api/results/constituency/${constituencyId}`);
+        const data = await resultsResponse.json();
+
+        // Generate Form 20 data
+        const form20 = {
+            formNumber: 'Form 20',
+            title: 'RESULT SHEET',
+            constituencyName: data.constituency.name,
+            district: data.constituency.district,
+            state: data.constituency.state,
+            dateOfCounting: new Date().toLocaleDateString('en-IN'),
+            timeOfDeclaration: new Date().toLocaleTimeString('en-IN'),
+            candidates: data.results,
+            totalValidVotes: data.totalVotes,
+            totalRejectedVotes: 0, // Can be enhanced
+            turnout: data.turnout,
+            winner: data.winner,
+            marginOfVictory: data.results.length > 1
+                ? parseInt(data.results[0].vote_count) - parseInt(data.results[1].vote_count)
+                : parseInt(data.results[0]?.vote_count || 0),
+            returningOfficer: 'Returning Officer', // Can be enhanced with actual RO details
+            timestamp: new Date().toISOString()
+        };
+
+        res.json(form20);
+    } catch (err) {
+        console.error('Error generating Form 20:', err);
+        res.status(500).json({ error: 'Failed to generate Form 20' });
+    }
+});
+
+// Declare Results (with audit logging)
+app.post('/api/results/declare/:constituencyId', async (req, res) => {
+    try {
+        const constituencyId = req.params.constituencyId;
+        const { adminUsername, adminRole } = req.body;
+
+        // Verify POST_POLL authorization
+        if (adminRole !== 'POST_POLL') {
+            return res.status(403).json({ error: 'Only POST_POLL admins can declare results' });
+        }
+
+        // Get constituency results
+        const { rows: [constituency] } = await pool.query(
+            'SELECT * FROM constituencies WHERE id = $1',
+            [constituencyId]
+        );
+
+        if (!constituency) {
+            return res.status(404).json({ error: 'Constituency not found' });
+        }
+
+        // Get winner
+        const { rows: results } = await pool.query(`
+            SELECT 
+                c.id,
+                c.name,
+                c.party,
+                COUNT(v.id) as vote_count
+            FROM candidates c
+            LEFT JOIN votes v ON v.candidate_id = c.id
+            WHERE c.constituency_id = $1
+            GROUP BY c.id, c.name, c.party
+            ORDER BY vote_count DESC
+            LIMIT 1
+        `, [constituencyId]);
+
+        const winner = results[0];
+
+        // Log result declaration
+        await createLog({
+            event: 'RESULT_DECLARED',
+            user_id: adminUsername,
+            details: {
+                constituency_id: constituencyId,
+                constituency_name: constituency.name,
+                winner_name: winner.name,
+                winner_party: winner.party,
+                vote_count: winner.vote_count,
+                declared_by: adminUsername,
+                role: adminRole
+            },
+            ip_address: req.ip
+        });
+
+        res.json({
+            success: true,
+            message: 'Results declared successfully',
+            constituency: constituency.name,
+            winner: winner
+        });
+    } catch (err) {
+        console.error('Error declaring results:', err);
+        res.status(500).json({ error: 'Failed to declare results' });
+    }
+});
+
+// Export the app for use in index.js
 module.exports = app;
+

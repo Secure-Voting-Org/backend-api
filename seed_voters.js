@@ -14,7 +14,7 @@ const seedVoters = async () => {
         await pool.query('TRUNCATE TABLE voters RESTART IDENTITY CASCADE');
         console.log("Cleared old voters.");
 
-        // Create table just in case
+        // Create table just in case it was dropped or doesn't exist
         await createVoterTable();
 
         const voters = [
@@ -33,7 +33,7 @@ const seedVoters = async () => {
             console.log(`Created voter ${voter.name} (${voter.constituency})`);
         }
 
-        console.log("Voter seeding completed.");
+        console.log("Voter seeding completed successfully.");
         process.exit(0);
     } catch (err) {
         console.error("Voter seeding failed:", err);
