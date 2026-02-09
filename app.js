@@ -24,6 +24,7 @@ const { addConstituency, getAllConstituencies } = require('./models/Constituency
 const { findCitizen } = require('./models/ElectoralRoll');
 const { createRecoveryRequest, getRecoveryRequest, updateRecoveryStatus, getAllRecoveryRequests } = require('./models/RecoveryRequest');
 const { loadOrGenerateKeys, getPublicKey, getPrivateKey } = require('./utils/encryption_keys');
+const { checkIpVelocity, logFraudSignal } = require('./utils/fraudEngine');
 
 // Load keys on start
 loadOrGenerateKeys().catch(err => console.error("Failed to load election keys:", err));
@@ -124,6 +125,12 @@ app.post('/api/admin/login', async (req, res) => {
                 details: { reason: 'Invalid password', role },
                 ip_address: req.ip
             });
+
+            // --- FRAUD CHECK: REPEATED LOGIN FAILURES (Primitive) ---
+            // In a real system, we'd query recent failure logs here.
+            // For now, let's just flag the IP if needed or trust the log monitoring.
+            // ----------------------------------------------------
+
             return res.status(401).json({ error: 'Invalid credentials' });
         }
 
@@ -460,7 +467,23 @@ app.post('/api/registration/submit', async (req, res) => {
     } = req.body;
 
     try {
-        console.log("DEBUG: Received Registration Submit for Pending Queue");
+        if (!formData) {
+            return res.status(400).json({ error: "Missing formData in request body" });
+        }
+
+        const clientIp = req.ip || req.headers['x-forwarded-for'] || req.connection.remoteAddress;
+
+        // --- FRAUD CHECK: REGISTRATION VELOCITY ---
+        const isHighVelocity = await checkIpVelocity(clientIp, 'REGISTRATION');
+        if (isHighVelocity) {
+            await logFraudSignal('HIGH_VELOCITY_REGISTRATION', {
+                count: 'Exceeded Limit',
+                aadhaar: aadhaar
+            }, clientIp);
+            // Optionally block, but let's just log for now to avoid blocking legitimate public computers
+            console.warn(`[FRAUD] High velocity registration detected from ${clientIp}`);
+        }
+        // ------------------------------------------
 
         // Map formData keys to DB columns for REGISTRATION table (Pending)
         // Ensure keys match what saveRegistrationDetails expects (camelCase)
@@ -492,6 +515,9 @@ app.post('/api/registration/submit', async (req, res) => {
         // Save to Pending Table (voter_registrations)
         // This function handles JSON stringifying of faceDescriptor internally if needed, or we pass object
         // Based on Voter.js: saveRegistrationDetails takes `details` and stringifies `faceDescriptor`
+        // Add IP Address to stored details
+        registrationData.ipAddress = clientIp;
+
         const applicationId = await saveRegistrationDetails(registrationData);
 
         console.log("DEBUG: Pending Registration Success. App ID:", applicationId);
@@ -766,6 +792,13 @@ app.post('/api/vote', async (req, res) => {
         console.error("Voting Error:", err);
         // Handle Unique Constraint Violation (Double Voting)
         if (err.code === '23505') { // Postgres unique_violation for unique_voter_id
+            // --- FRAUD CHECK: DUPLICATE VOTE ATTEMPT ---
+            const clientIp = req.ip || req.connection.remoteAddress;
+            await logFraudSignal('DUPLICATE_VOTE_ATTEMPT', {
+                details: 'Token already used',
+                signature_snippet: signature ? signature.substring(0, 10) + '...' : 'N/A'
+            }, clientIp);
+            // ------------------------------------------
             return res.status(403).json({ error: 'Duplicate Vote: This token has already been used.' });
         }
         res.status(500).json({ error: 'Voting failed' });

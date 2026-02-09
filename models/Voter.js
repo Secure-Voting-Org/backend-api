@@ -72,11 +72,11 @@ const createRegistrationTable = async () => {
         disability_details TEXT,
         face_descriptor_temp JSON, -- Store face here temporarily
         status VARCHAR(20) DEFAULT 'PENDING', -- PENDING, APPROVED, REJECTED
+        ip_address VARCHAR(45),
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
     )`;
     await pool.query(query);
 };
-
 
 // Find Voter by ID
 const findVoterById = async (id) => {
@@ -84,6 +84,7 @@ const findVoterById = async (id) => {
     const { rows } = await pool.query(query, [id]);
     return rows[0];
 };
+
 const findVoterByReferenceId = async (referenceId) => {
     const query = 'SELECT * FROM voters WHERE reference_id = $1';
     const { rows } = await pool.query(query, [referenceId]);
@@ -165,13 +166,13 @@ const saveRegistrationDetails = async (details) => {
         referenceId, // Expect referenceId from controller
         aadhaar, name, relativeName, relativeType,
         state, district, constituency, dob, gender,
-        mobile, email, address, disability, faceDescriptor
+        mobile, email, address, disability, faceDescriptor, ipAddress
     } = details;
 
     const query = `
         INSERT INTO voter_registrations 
-        (reference_id, aadhaar_number, full_name, relative_name, relative_type, state, district, constituency, dob, gender, mobile, email, address, disability_details, face_descriptor_temp, status)
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, 'PENDING')
+        (reference_id, aadhaar_number, full_name, relative_name, relative_type, state, district, constituency, dob, gender, mobile, email, address, disability_details, face_descriptor_temp, status, ip_address)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, 'PENDING', $16)
         RETURNING application_id
     `;
 
@@ -179,7 +180,7 @@ const saveRegistrationDetails = async (details) => {
         referenceId, // $1
         aadhaar, name, relativeName, relativeType,
         state, district, constituency, dob, gender,
-        mobile, email, address, disability, JSON.stringify(faceDescriptor)
+        mobile, email, address, disability, JSON.stringify(faceDescriptor), ipAddress
     ]);
     return rows[0].application_id;
 };
