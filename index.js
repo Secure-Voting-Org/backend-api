@@ -39,7 +39,12 @@ checkDbConnection().then(async () => {
 
         // Seed Observer
         createObserver('observer1', 'securepass', 'Election Observer One');
-        console.log("All Database Tables Initialized Successfully.");
+
+        // Init Epic 3 Blockchain Service
+        const BlockchainService = require('./services/BlockchainService');
+        await BlockchainService.initialize();
+
+        console.log("All Database Tables & Blockchain Ledger Initialized.");
     } catch (err) {
         console.error("FATAL ERROR during Database Initialization:", err);
     }

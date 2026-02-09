@@ -26,6 +26,7 @@ const { createRecoveryRequest, getRecoveryRequest, updateRecoveryStatus, getAllR
 const { loadOrGenerateKeys, getPublicKey, getPrivateKey } = require('./utils/encryption_keys');
 const { checkIpVelocity, logFraudSignal } = require('./utils/fraudEngine');
 const MempoolService = require('./services/MempoolService');
+const BlindSignature = require('./utils/BlindSignature');
 
 // Load keys on start
 loadOrGenerateKeys().catch(err => console.error("Failed to load election keys:", err));
@@ -711,8 +712,6 @@ app.post('/api/login', async (req, res) => {
     res.json({ success: true });
 });
 
-const BlindSignature = require('./utils/BlindSignature');
-
 // Generate Keys on Startup (or load from DB/File in prod)
 BlindSignature.generateKeys();
 
@@ -771,20 +770,28 @@ app.post('/api/vote', async (req, res) => {
     }
 
     try {
-        // --- NEW BLOCKCHAIN NODE LOGIC (Validation & Mempool) ---
-        const result = await MempoolService.addTransaction({
-            vote,
-            auth_token,
-            signature,
-            constituency
-        });
+        // Verify: s^e % n == token
+        // Important: auth_token is the UNBLINDED message (BigInt string)
+        const isValid = BlindSignature.verify(auth_token, signature);
 
+        if (!isValid) {
+            return res.status(401).json({ error: 'Invalid Blind Signature' });
+        }
+
+        // --- EPIC 3: Blockchain Shadowing ---
+        // Add to Mempool silently. Does not affect main flow.
+        const sourceIp = req.ip || req.connection.remoteAddress;
+        MempoolService.add({ vote, auth_token, signature, constituency }, sourceIp)
+            .catch(err => console.error("[Epic3] Mempool shadow failed:", err));
+
+        // --- ORIGINAL BUSINESS LOGIC (Constraint: Do NOT modify) ---
+        // 2. Anonymize Voter ID (Hash the token to prevent double voting)
+        const anonymousId = require('crypto').createHash('sha256').update(auth_token).digest('hex');
+
+        // 3. Cast Vote
+        const result = await castVote(anonymousId, vote, constituency);
         if (result.success) {
-            res.json({
-                success: true,
-                transactionHash: result.transactionHash,
-                status: result.status
-            });
+            res.json({ success: true, transactionHash: result.transactionHash });
         } else {
             res.status(400).json({ error: result.error });
         }
