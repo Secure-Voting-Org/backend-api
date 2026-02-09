@@ -12,6 +12,8 @@ app.use(express.json({ limit: '50mb' }));
 const { findVoterById, updateVoterFace, createVoter, saveRegistrationDetails, incrementRetry, lockAccount, resetLocks, getAllVoters, findPendingRegistrationByAadhaar, getFlaggedRegistrations } = require('./models/Voter');
 const { createLog, getAllLogs } = require('./models/Log');
 const { checkIpVelocity, checkDeviceVelocity, checkFaceSimilarity, calculateRiskScore, logFraudSignal } = require('./utils/fraudEngine');
+const { generateToken, createSession, invalidateSession } = require('./utils/authService');
+const authMiddleware = require('./middleware/authMiddleware');
 
 const { getCandidatesByConstituency, getCandidatesByMetadata, createCandidate } = require('./models/Candidate');
 const { findObserverByUsername } = require('./models/Observer');
@@ -597,8 +599,14 @@ app.get('/api/application/status/:referenceId', async (req, res) => {
 });
 
 // Get Voter by ID
-app.get('/api/voter/:id', async (req, res) => {
+// Helper to get Voter by ID (Protected)
+app.get('/api/voter/:id', authMiddleware, async (req, res) => {
     try {
+        // Ensure user can only access their own data
+        if (req.user.id !== req.params.id && req.user.mobile !== req.params.id) {
+            return res.status(403).json({ error: 'Unauthorized access to voter profile' });
+        }
+
         const voter = await findVoterById(req.params.id);
         if (!voter) return res.status(404).json({ error: 'Voter not found' });
         res.json(voter);
@@ -1262,20 +1270,48 @@ app.post('/api/voter/register', async (req, res) => {
 // Voter Login
 app.post('/api/voter/login', async (req, res) => {
     const { mobile, password } = req.body;
+    const deviceHash = req.headers['x-device-hash'];
+
     try {
         const voter = await findVoterAuthByMobile(mobile);
         if (!voter || voter.password_hash !== password) {
             return res.status(401).json({ error: 'Invalid mobile or password' });
         }
 
-        res.json({ success: true, user: { name: voter.full_name, mobile: voter.mobile, email: voter.email } });
+        // Generate Token
+        const token = generateToken(voter, deviceHash);
+
+        // Create Session (and invalidate old ones)
+        // Use IP from request
+        const clientIp = req.ip || req.headers['x-forwarded-for'] || req.connection.remoteAddress;
+        const userAgent = req.headers['user-agent'];
+
+        await createSession(voter.mobile, token, deviceHash, clientIp, userAgent);
+
+        res.json({
+            success: true,
+            token: token,
+            user: { name: voter.full_name, mobile: voter.mobile, email: voter.email }
+        });
     } catch (err) {
         console.error("Voter Login Error:", err);
         res.status(500).json({ error: 'Login failed' });
     }
 });
 
-// Voter Forgot Password - Send OTP
+// Voter Logout
+app.post('/api/voter/logout', async (req, res) => {
+    try {
+        const token = req.headers['authorization']?.split(' ')[1];
+        if (token) {
+            await invalidateSession(token);
+        }
+        res.json({ success: true, message: 'Logged out successfully' });
+    } catch (err) {
+        console.error("Logout Error:", err);
+        res.status(500).json({ error: 'Logout failed' });
+    }
+});
 app.post('/api/voter/forgot-password', async (req, res) => {
     const { email } = req.body;
     try {
