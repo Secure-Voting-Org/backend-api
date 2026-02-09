@@ -98,6 +98,13 @@ const findRegistrationByReferenceId = async (referenceId) => {
     return rows[0];
 };
 
+// Find Pending Registration by Aadhaar
+const findPendingRegistrationByAadhaar = async (aadhaar) => {
+    const query = "SELECT * FROM voter_registrations WHERE aadhaar_number = $1 AND status = 'PENDING'";
+    const { rows } = await pool.query(query, [aadhaar]);
+    return rows[0];
+};
+
 // Create Voter (Approved/Full Profile)
 const createVoter = async (voter) => {
     const query = `
@@ -166,13 +173,14 @@ const saveRegistrationDetails = async (details) => {
         referenceId, // Expect referenceId from controller
         aadhaar, name, relativeName, relativeType,
         state, district, constituency, dob, gender,
-        mobile, email, address, disability, faceDescriptor, ipAddress
+        mobile, email, address, disability, faceDescriptor, ipAddress, deviceHash,
+        riskScore, riskFlags
     } = details;
 
     const query = `
         INSERT INTO voter_registrations 
-        (reference_id, aadhaar_number, full_name, relative_name, relative_type, state, district, constituency, dob, gender, mobile, email, address, disability_details, face_descriptor_temp, status, ip_address)
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, 'PENDING', $16)
+        (reference_id, aadhaar_number, full_name, relative_name, relative_type, state, district, constituency, dob, gender, mobile, email, address, disability_details, face_descriptor_temp, status, ip_address, device_hash, risk_score, risk_flags)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, 'PENDING', $16, $17, $18, $19)
         RETURNING application_id
     `;
 
@@ -180,7 +188,8 @@ const saveRegistrationDetails = async (details) => {
         referenceId, // $1
         aadhaar, name, relativeName, relativeType,
         state, district, constituency, dob, gender,
-        mobile, email, address, disability, JSON.stringify(faceDescriptor), ipAddress
+        mobile, email, address, disability, JSON.stringify(faceDescriptor), ipAddress, deviceHash,
+        riskScore || 0, JSON.stringify(riskFlags || [])
     ]);
     return rows[0].application_id;
 };
@@ -252,6 +261,18 @@ const getAllVoters = async () => {
     return rows;
 };
 
+// Get Flagged Registrations (High Risk)
+const getFlaggedRegistrations = async () => {
+    const query = `
+        SELECT application_id, aadhaar_number, full_name, risk_score, risk_flags, status, created_at
+        FROM voter_registrations
+        WHERE risk_score >= 50 OR status = 'FLAGGED'
+        ORDER BY risk_score DESC, created_at DESC
+    `;
+    const { rows } = await pool.query(query);
+    return rows;
+};
+
 module.exports = {
     createVoterTable,
     createRegistrationTable,
@@ -259,6 +280,7 @@ module.exports = {
     findVoterById,
     findVoterByReferenceId,
     findRegistrationByReferenceId,
+    findPendingRegistrationByAadhaar,
     findVoterByEmail,
     createVoter,
     createVoterAuth,
@@ -271,6 +293,7 @@ module.exports = {
     lockAccount,
     resetLocks,
     getAllVoters,
+    getFlaggedRegistrations,
     checkTokenIssued,
     markTokenIssued
 };
