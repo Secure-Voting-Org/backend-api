@@ -6,7 +6,7 @@ require('dotenv').config();
 const { checkDbConnection } = require('./config/db');
 
 // Import models for database tables
-const { createVoterTable, createRegistrationTable, createVoterAuthTable, findVoterById, updateVoterFace, createVoter, saveRegistrationDetails } = require('./models/Voter');
+const { createVoterTable, createRegistrationTable, createVoterAuthTable, createVoterRegistrationAuthTable, findVoterById, updateVoterFace, createVoter, saveRegistrationDetails } = require('./models/Voter');
 const { createLogTable, createLog, getAllLogs } = require('./models/Log');
 
 const { createCandidateTable } = require('./models/Candidate');
@@ -29,7 +29,8 @@ checkDbConnection().then(async () => {
         // Create necessary tables if they don't exist
         await createVoterTable();
         await createRegistrationTable();
-        await createVoterAuthTable();
+        await createVoterAuthTable(); // Keeps old table if needed
+        await createVoterRegistrationAuthTable(); // New required table
         await createLogTable();
         await createCandidateTable();
         await createObserverTable();

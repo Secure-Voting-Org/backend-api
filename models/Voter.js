@@ -56,31 +56,28 @@ const createVoterTable = async () => {
 // Create Registration Details Table (Full Form Data)
 const createRegistrationTable = async () => {
     const query = `
-    CREATE TABLE IF NOT EXISTS voter_registrations (
-        application_id SERIAL PRIMARY KEY,
-        reference_id VARCHAR(50) UNIQUE, -- Added Reference ID explicitly
+    CREATE TABLE IF NOT EXISTS voter_registrations(
+    application_id SERIAL PRIMARY KEY,
+    reference_id VARCHAR(50) UNIQUE, --Added Reference ID explicitly
         voter_id VARCHAR(20) REFERENCES voters(id),
-        aadhaar_number VARCHAR(20),
-        full_name VARCHAR(100),
-        relative_name VARCHAR(100),
-        relative_type VARCHAR(20),
-        state VARCHAR(50),
-        district VARCHAR(50),
-        constituency VARCHAR(100),
-        dob VARCHAR(20),
-        gender VARCHAR(20),
-        mobile VARCHAR(15),
-        email VARCHAR(100),
-        address TEXT,
-        disability_details TEXT,
-        face_descriptor_temp JSON, -- Store face here temporarily
-        status VARCHAR(20) DEFAULT 'PENDING', -- PENDING, APPROVED, REJECTED
-        rejection_reason TEXT, -- Reason for rejection
+    aadhaar_number VARCHAR(20),
+    full_name VARCHAR(100),
+    relative_name VARCHAR(100),
+    relative_type VARCHAR(20),
+    state VARCHAR(50),
+    district VARCHAR(50),
+    constituency VARCHAR(100),
+    dob VARCHAR(20),
+    gender VARCHAR(20),
+    mobile VARCHAR(15),
+    email VARCHAR(100),
+    address TEXT,
+    disability_details TEXT,
+    face_descriptor_temp JSON, --Store face here temporarily
+        status VARCHAR(20) DEFAULT 'PENDING', --PENDING, APPROVED, REJECTED
+        rejection_reason TEXT, --Reason for rejection
         ip_address VARCHAR(45),
-        device_hash VARCHAR(100),
-        risk_score INTEGER DEFAULT 0,
-        risk_flags JSON,
-        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
     )`;
     await pool.query(query);
 };
@@ -121,22 +118,22 @@ const findPendingRegistrationByAadhaar = async (aadhaar) => {
 // Create Voter (Approved/Full Profile)
 const createVoter = async (voter) => {
     const query = `
-        INSERT INTO voters (
-            id, reference_id, name, surname, gender, dob, 
-            mobile, email, address, district, state, pincode, 
-            relative_name, relative_type, disability_type, 
-            profile_image_data, dob_proof_data, address_proof_data, disability_proof_data,
-            constituency, face_descriptor,
-            status
-        ) VALUES (
-            $1, $2, $3, $4, $5, $6, 
-            $7, $8, $9, $10, $11, $12, 
-            $13, $14, $15, 
-            $16, $17, $18, $19,
-            $20, $21,
-            'APPROVED'
-        ) RETURNING *
-    `;
+        INSERT INTO voters(
+        id, reference_id, name, surname, gender, dob,
+        mobile, email, address, district, state, pincode,
+        relative_name, relative_type, disability_type,
+        profile_image_data, dob_proof_data, address_proof_data, disability_proof_data,
+        constituency, face_descriptor,
+        status
+    ) VALUES(
+        $1, $2, $3, $4, $5, $6,
+        $7, $8, $9, $10, $11, $12,
+        $13, $14, $15,
+        $16, $17, $18, $19,
+        $20, $21,
+        'APPROVED'
+    ) RETURNING *
+        `;
     const values = [
         voter.id, voter.reference_id, voter.name, voter.surname, voter.gender, voter.dob,
         voter.mobile, voter.email, voter.address, voter.district, voter.state, voter.pincode,
@@ -190,14 +187,13 @@ const saveRegistrationDetails = async (details) => {
         aadhaar, name, relativeName, relativeType,
         state, district, constituency, dob, gender,
         mobile, email, address, disability, faceDescriptor,
-        profileImage, dobProof, addressProof, disabilityProof, // New fields
-        ipAddress, deviceHash, riskScore, riskFlags // Fraud fields
+        profileImage, dobProof, addressProof, disabilityProof // New fields
     } = details;
 
     const query = `
-        INSERT INTO voter_registrations 
-        (reference_id, aadhaar_number, full_name, relative_name, relative_type, state, district, constituency, dob, gender, mobile, email, address, disability_details, face_descriptor_temp, profile_image_data, dob_proof_data, address_proof_data, disability_proof_data, ip_address, device_hash, risk_score, risk_flags, status)
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, 'PENDING')
+        INSERT INTO voter_registrations
+    (reference_id, aadhaar_number, full_name, relative_name, relative_type, state, district, constituency, dob, gender, mobile, email, address, disability_details, face_descriptor_temp, profile_image_data, dob_proof_data, address_proof_data, disability_proof_data, status)
+VALUES($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, 'PENDING')
         RETURNING application_id
     `;
 
@@ -206,8 +202,7 @@ const saveRegistrationDetails = async (details) => {
         aadhaar, name, relativeName, relativeType,
         state, district, constituency, dob, gender,
         mobile, email, address, disability, JSON.stringify(faceDescriptor),
-        profileImage, dobProof, addressProof, disabilityProof,
-        ipAddress, deviceHash, riskScore, JSON.stringify(riskFlags)
+        profileImage, dobProof, addressProof, disabilityProof
     ]);
     return rows[0].application_id;
 };
@@ -253,23 +248,23 @@ const approveRegistration = async (applicationId) => {
         if (app.status !== 'PENDING') throw new Error("Application is not pending");
 
         // 2. Generate Voter ID (Format: RDV + 7 Random Digits)
-        const voterId = `RDV${Math.floor(1000000 + Math.random() * 9000000)}`;
+        const voterId = `RDV${Math.floor(1000000 + Math.random() * 9000000)} `;
 
         // 3. Insert into Voters Table
         const insertQuery = `
-            INSERT INTO voters (
-                id, reference_id, name, surname, gender, dob, constituency, face_descriptor,
-                mobile, email, address, district, state,
-                relative_name, relative_type, disability_type,
-                profile_image_data, dob_proof_data, address_proof_data, disability_proof_data,
-                status
-            ) VALUES (
-                $1, $2, $3, $4, $5, $6, $7, $8,
-                $9, $10, $11, $12, $13,
-                $14, $15, $16,
-                $17, $18, $19, $20,
-                'APPROVED'
-            )
+            INSERT INTO voters(
+        id, reference_id, name, surname, gender, dob, constituency, face_descriptor,
+        mobile, email, address, district, state,
+        relative_name, relative_type, disability_type,
+        profile_image_data, dob_proof_data, address_proof_data, disability_proof_data,
+        status
+    ) VALUES(
+        $1, $2, $3, $4, $5, $6, $7, $8,
+        $9, $10, $11, $12, $13,
+        $14, $15, $16,
+        $17, $18, $19, $20,
+        'APPROVED'
+    )
         `;
 
         // Parse name into Name + Surname if needed, or just use full name as Name
@@ -327,7 +322,7 @@ const getApplicationStatus = async (referenceId) => {
         return {
             status: 'APPROVED',
             voter_id: v.voter_id,
-            name: `${v.name} ${v.surname}`.trim(),
+            name: `${v.name} ${v.surname} `.trim(),
             constituency: v.constituency
         };
     }
@@ -348,10 +343,12 @@ const findVoterByEmail = async (email) => {
 
 // --- VOTER AUTHENTICATION (Login) ---
 
-// Create Voter Auth Table (Pre-registration)
-const createVoterAuthTable = async () => {
+// --- VOTER REGISTRATION AUTH (Sign Up Credentials) ---
+
+// Create Voter Registration Auth Table
+const createVoterRegistrationAuthTable = async () => {
     const query = `
-    CREATE TABLE IF NOT EXISTS voter_auth (
+    CREATE TABLE IF NOT EXISTS voter_registration_auth(
         id SERIAL PRIMARY KEY,
         mobile VARCHAR(15) UNIQUE NOT NULL,
         email VARCHAR(100) UNIQUE,
@@ -362,37 +359,44 @@ const createVoterAuthTable = async () => {
     await pool.query(query);
 };
 
-// Voter Auth Functions
-const createVoterAuth = async (fullName, mobile, email, password) => {
+// Create Voter Auth Record
+const createVoterRegistrationAuth = async (fullName, mobile, email, password) => {
+    const crypto = require('crypto');
+    // Simple hash for now (In prod, use bcrypt or argon2)
+    const hash = crypto.createHash('sha256').update(password).digest('hex');
+
     const query = `
-        INSERT INTO voter_auth (full_name, mobile, email, password_hash)
-        VALUES ($1, $2, $3, $4)
-        RETURNING *`;
-    const { rows } = await pool.query(query, [fullName, mobile, email, password]);
+        INSERT INTO voter_registration_auth(full_name, mobile, email, password_hash)
+        VALUES($1, $2, $3, $4)
+        RETURNING *
+    `;
+    const { rows } = await pool.query(query, [fullName, mobile, email, hash]);
     return rows[0];
 };
 
 const findVoterAuthByMobile = async (mobile) => {
-    const query = 'SELECT * FROM voter_auth WHERE mobile = $1';
+    const query = 'SELECT * FROM voter_registration_auth WHERE mobile = $1';
     const { rows } = await pool.query(query, [mobile]);
     return rows[0];
 };
 
 const findVoterAuthByEmail = async (email) => {
-    const query = 'SELECT * FROM voter_auth WHERE email = $1';
+    const query = 'SELECT * FROM voter_registration_auth WHERE email = $1';
     const { rows } = await pool.query(query, [email]);
     return rows[0];
 };
 
 const updateVoterPassword = async (email, newPassword) => {
-    const query = 'UPDATE voter_auth SET password_hash = $1 WHERE email = $2';
-    await pool.query(query, [newPassword, email]);
+    const crypto = require('crypto');
+    const hash = crypto.createHash('sha256').update(newPassword).digest('hex');
+    const query = 'UPDATE voter_registration_auth SET password_hash = $1 WHERE email = $2';
+    await pool.query(query, [hash, email]);
 };
 
 const getAllVoters = async () => {
     const query = `
-        SELECT id, reference_id, name, surname, constituency, status, 
-               has_voted, retry_count, locked_until, created_at 
+        SELECT id, reference_id, name, surname, constituency, status,
+    has_voted, retry_count, locked_until, created_at 
         FROM voters 
         ORDER BY created_at DESC`;
     const { rows } = await pool.query(query);
@@ -414,14 +418,14 @@ const getFlaggedRegistrations = async () => {
 module.exports = {
     createVoterTable,
     createRegistrationTable,
-    createVoterAuthTable,
+    createVoterAuthTable: createVoterRegistrationAuthTable, // Alias for backward compatibility if needed, or just replace
     findVoterById,
     findVoterByReferenceId,
     findRegistrationByReferenceId,
     findPendingRegistrationByAadhaar,
     findVoterByEmail,
     createVoter,
-    createVoterAuth,
+    createVoterRegistrationAuth,
     findVoterAuthByMobile,
     findVoterAuthByEmail,
     updateVoterPassword,
@@ -433,5 +437,11 @@ module.exports = {
     getAllVoters,
     getFlaggedRegistrations,
     checkTokenIssued,
-    markTokenIssued
+    markTokenIssued,
+    getPendingRegistrations,
+    getApplicationDetails,
+    approveRegistration,
+    rejectRegistration,
+    getApplicationStatus,
+    createVoterRegistrationAuthTable // Explicit export
 };

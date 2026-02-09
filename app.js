@@ -9,17 +9,15 @@ const path = require('path');
 const app = express();
 
 // Middleware: Enable CORS for frontend access
-app.use(cors({
-    origin: ['http://localhost:5173', 'http://127.0.0.1:5173'],
-    credentials: true
-}));
+app.use(cors());
 // Middleware: Parse JSON bodies (increased limit for images)
 app.use(express.json({ limit: '50mb' }));
 
 
 
 
-const { findVoterById, updateVoterFace, createVoter, saveRegistrationDetails, incrementRetry, lockAccount, resetLocks, getAllVoters, findPendingRegistrationByAadhaar, getFlaggedRegistrations } = require('./models/Voter');
+
+const { findVoterById, updateVoterFace, createVoter, saveRegistrationDetails, incrementRetry, lockAccount, resetLocks, getAllVoters, findPendingRegistrationByAadhaar, getFlaggedRegistrations, getPendingRegistrations, getApplicationDetails, approveRegistration, rejectRegistration, getApplicationStatus, createVoterRegistrationAuth, findVoterAuthByMobile, findVoterAuthByEmail, updateVoterPassword } = require('./models/Voter');
 const { createLog, getAllLogs } = require('./models/Log');
 const { checkIpVelocity, checkDeviceVelocity, checkFaceSimilarity, calculateRiskScore, logFraudSignal } = require('./utils/fraudEngine');
 const { generateToken, createSession, invalidateSession } = require('./utils/authService');
@@ -112,6 +110,53 @@ app.get('/api/admin/voters', async (req, res) => {
     } catch (err) {
         console.error("Failed to fetch voters:", err);
         res.status(500).json({ error: 'Failed to fetch voters' });
+    }
+});
+
+// Get Pending Registrations
+app.get('/api/admin/pending-voters', async (req, res) => {
+    try {
+        const pending = await getPendingRegistrations();
+        res.json(pending);
+    } catch (err) {
+        console.error("Failed to fetch pending applications:", err);
+        res.status(500).json({ error: 'Failed to fetch pending applications' });
+    }
+});
+
+// Get Pending Registration Details
+app.get('/api/admin/pending-voter/:id', async (req, res) => {
+    try {
+        const application = await getApplicationDetails(req.params.id);
+        if (!application) return res.status(404).json({ error: 'Application not found' });
+        res.json(application);
+    } catch (err) {
+        console.error("Failed to fetch application details:", err);
+        res.status(500).json({ error: 'Failed to fetch details' });
+    }
+});
+
+// Approve Voter Registration
+app.post('/api/admin/approve-voter', async (req, res) => {
+    const { applicationId } = req.body;
+    try {
+        const result = await approveRegistration(applicationId);
+        res.json({ success: true, message: 'Voter Approved', voterId: result.voterId });
+    } catch (err) {
+        console.error("Approval failed:", err);
+        res.status(500).json({ error: 'Approval failed: ' + err.message });
+    }
+});
+
+// Reject Voter Registration
+app.post('/api/admin/reject-voter', async (req, res) => {
+    const { applicationId, reason } = req.body;
+    try {
+        await rejectRegistration(applicationId, reason);
+        res.json({ success: true, message: 'Voter Rejected' });
+    } catch (err) {
+        console.error("Rejection failed:", err);
+        res.status(500).json({ error: 'Rejection failed' });
     }
 });
 
@@ -276,6 +321,41 @@ app.post('/api/admin/forgot-password/verify-otp', async (req, res) => {
     } catch (err) {
         console.error(err);
         res.status(500).json({ error: 'OTP verification failed' });
+    }
+});
+
+
+// Voter Signup for Voter Registration App
+app.post('/api/voter/signup', async (req, res) => {
+    const { name, mobile, email, password } = req.body;
+
+    if (!name || !mobile || !email || !password) {
+        return res.status(400).json({ error: 'All fields (Name, Mobile, Email, Password) are required' });
+    }
+
+    try {
+        // Check duplicate mobile
+        const existingMobile = await findVoterAuthByMobile(mobile);
+        if (existingMobile) {
+            return res.status(409).json({ error: 'Mobile number already registered' });
+        }
+
+        // Check duplicate email
+        const existingEmail = await findVoterAuthByEmail(email);
+        if (existingEmail) {
+            return res.status(409).json({ error: 'Email already registered' });
+        }
+
+        // Create Auth Record
+        await createVoterRegistrationAuth(name, mobile, email, password);
+
+        // Log success (optional)
+        console.log(`New voter signup: ${name} (${mobile})`);
+
+        res.status(201).json({ success: true, message: 'Signup successful. You can now login.' });
+    } catch (err) {
+        console.error("Signup Error:", err);
+        res.status(500).json({ error: 'Signup failed: ' + err.message });
     }
 });
 
@@ -699,16 +779,19 @@ app.post('/api/registration/submit', async (req, res) => {
 app.get('/api/application/status/:referenceId', async (req, res) => {
     const { referenceId } = req.params;
     try {
-        const { findRegistrationByReferenceId } = require('./models/Voter'); // lazy import or move top
-        const voter = await findRegistrationByReferenceId(referenceId);
+        // Use the centralized helper that formats the data correctly
+        const status = await getApplicationStatus(referenceId);
 
-        if (!voter) {
-            return res.status(404).json({ error: 'Application not found' });
+        if (!status) {
+            return res.status(404).json({ error: 'Application not found. Please check your Reference ID.' });
         }
-        res.json(voter);
+
+        // Wrap in success: true as expected by frontend
+        res.json({ success: true, ...status });
+
     } catch (err) {
-        console.error(err);
-        res.status(500).json({ error: 'Failed to fetch status' });
+        console.error('Error fetching application status:', err);
+        res.status(500).json({ error: 'Failed to fetch application status' });
     }
 });
 
@@ -1179,6 +1262,42 @@ app.get('/api/public-ledger', async (req, res) => {
     }
 });
 
+// Verify Vote Receipt
+app.post('/api/verify-receipt', async (req, res) => {
+    const { transactionHash } = req.body;
+
+    if (!transactionHash || transactionHash.length !== 64) {
+        return res.status(400).json({ error: 'Invalid receipt format' });
+    }
+
+    try {
+        const { pool } = require('./config/db');
+        const query = 'SELECT transaction_hash, constituency, timestamp FROM votes WHERE transaction_hash = $1';
+        const { rows } = await pool.query(query, [transactionHash]);
+
+        if (rows.length === 0) {
+            return res.json({
+                verified: false,
+                message: 'Receipt not found in the system'
+            });
+        }
+
+        res.json({
+            verified: true,
+            vote: {
+                transactionHash: rows[0].transaction_hash,
+                constituency: rows[0].constituency,
+                timestamp: rows[0].timestamp
+            },
+            message: 'Vote successfully verified on the blockchain'
+        });
+    } catch (err) {
+        console.error('Verification error:', err);
+        res.status(500).json({ error: 'Verification failed' });
+    }
+});
+
+
 
 // Example route calling Python AI module
 app.post('/api/fraud-check', (req, res) => {
@@ -1312,61 +1431,11 @@ app.post('/api/admin/recovery/approve', async (req, res) => {
     }
 });
 
-// --- PENDING VOTER VERIFICATION ROUTES ---
 
-const { getPendingRegistrations, approveRegistration, rejectRegistration } = require('./models/Voter');
-
-// Get Pending Registrations
-app.get('/api/admin/pending-voters', async (req, res) => {
-    try {
-        const list = await getPendingRegistrations();
-        res.json(list);
-    } catch (err) {
-        console.error("Fetch Pending Error:", err);
-        res.status(500).json({ error: 'Failed to fetch pending voters' });
-    }
-});
-
-// Get Single Application Details
-const { getApplicationDetails } = require('./models/Voter');
-app.get('/api/admin/pending-voter/:id', async (req, res) => {
-    try {
-        const details = await getApplicationDetails(req.params.id);
-        if (!details) return res.status(404).json({ error: 'Application not found' });
-        res.json(details);
-    } catch (err) {
-        console.error("Fetch Detail Error:", err);
-        res.status(500).json({ error: 'Failed to fetch application details' });
-    }
-});
-
-// Approve Voter Registration
-app.post('/api/admin/approve-voter', async (req, res) => {
-    const { applicationId } = req.body;
-    try {
-        const result = await approveRegistration(applicationId);
-        res.json(result);
-    } catch (err) {
-        console.error("Approve Error:", err);
-        res.status(500).json({ error: 'Approval failed: ' + err.message });
-    }
-});
-
-// Reject Voter Registration
-app.post('/api/admin/reject-voter', async (req, res) => {
-    const { applicationId, reason } = req.body;
-    try {
-        await rejectRegistration(applicationId, reason);
-        res.json({ success: true, message: 'Application Rejected' });
-    } catch (err) {
-        console.error("Reject Error:", err);
-        res.status(500).json({ error: 'Rejection failed' });
-    }
-});
 
 // Check Application Status (Public)
 // Check Application Status (Public)
-const { getApplicationStatus } = require('./models/Voter');
+
 app.get('/api/application/status/:referenceId', async (req, res) => {
     try {
         const { referenceId } = req.params;
@@ -1429,7 +1498,7 @@ app.post('/api/sys-admin/register', async (req, res) => {
 // VOTER AUTHENTICATION (Real Auth)
 // ==========================================
 
-const { createVoterAuth, findVoterAuthByMobile, findVoterAuthByEmail, updateVoterPassword } = require('./models/Voter');
+// Auth functions imported at top
 
 // Voter Register
 app.post('/api/voter/register', async (req, res) => {
@@ -1454,7 +1523,7 @@ app.post('/api/voter/register', async (req, res) => {
 
         // In a real app, hash password here!
         // const hashedPassword = await bcrypt.hash(password, 10);
-        const voter = await createVoterAuth(fullName, mobile, email, password);
+        const voter = await createVoterRegistrationAuth(fullName, mobile, email, password);
 
         res.json({ success: true, user: { name: voter.full_name, mobile: voter.mobile, email: voter.email } });
     } catch (err) {
@@ -1752,7 +1821,7 @@ app.get('/api/results/form20/:constituencyId', async (req, res) => {
         const constituencyId = req.params.constituencyId;
 
         // Get full constituency results
-        const resultsResponse = await fetch(`http://localhost:8081/api/results/constituency/${constituencyId}`);
+        const resultsResponse = await fetch(`http://localhost:5000/api/results/constituency/${constituencyId}`);
         const data = await resultsResponse.json();
 
         // Generate Form 20 data

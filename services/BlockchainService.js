@@ -122,9 +122,9 @@ class BlockchainService {
     startIntegrityWatchdog() {
         setInterval(async () => {
             try {
-                console.log(`[${new Date().toLocaleTimeString()}] [BlockchainService-Watchdog] Starting periodic integrity verification...`);
+                // console.log(`[${new Date().toLocaleTimeString()}] [BlockchainService-Watchdog] Starting periodic integrity verification...`);
                 await this.verifyChain();
-                console.log(`[${new Date().toLocaleTimeString()}] [BlockchainService-Watchdog] Integrity verification completed.`);
+                // console.log(`[${new Date().toLocaleTimeString()}] [BlockchainService-Watchdog] Integrity verification completed.`);
             } catch (err) {
                 console.error("[BlockchainService-Watchdog] FATAL: Watchdog loop encountered an error:", err);
             }
@@ -138,7 +138,7 @@ class BlockchainService {
      */
     async verifyChain() {
         const blocks = await BlockchainModel.getAllBlocks();
-        console.log(`[BlockchainService] Verifying chain... Blocks count: ${blocks.length}`);
+        // console.log(`[BlockchainService] Verifying chain... Blocks count: ${blocks.length}`);
         this.lastIntegrityStatus.lastChecked = new Date().toISOString();
 
         if (blocks.length === 0) {
