@@ -1,12 +1,16 @@
+// Main backend application logic
 const express = require('express');
 require('dotenv').config();
 const cors = require('cors');
 const { spawn } = require('child_process');
 const path = require('path');
 
+// Initialize Express App
 const app = express();
 
+// Middleware: Enable CORS for frontend access
 app.use(cors());
+// Middleware: Parse JSON bodies (increased limit for images)
 app.use(express.json({ limit: '50mb' }));
 
 const { findVoterById, updateVoterFace, createVoter, saveRegistrationDetails, incrementRetry, lockAccount, resetLocks, getAllVoters, findPendingRegistrationByAadhaar, getFlaggedRegistrations } = require('./models/Voter');
@@ -33,7 +37,9 @@ const BlindSignature = require('./utils/BlindSignature');
 // Load keys on start
 loadOrGenerateKeys().catch(err => console.error("Failed to load election keys:", err));
 
-// Routes
+// --- REST API ROUTES ---
+
+// Health Check Route
 app.get('/', (req, res) => {
     res.json({ message: 'SecureVote Backend API is running' });
 });
@@ -1745,5 +1751,6 @@ app.post('/api/results/declare/:constituencyId', async (req, res) => {
     }
 });
 
+// Export the app for use in index.js
 module.exports = app;
 
