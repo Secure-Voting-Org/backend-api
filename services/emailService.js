@@ -86,4 +86,20 @@ const sendOtpEmail = async (email, otp) => {
     }
 };
 
-module.exports = { sendOtpEmail };
+const sendAlertEmail = async (subject, message) => {
+    try {
+        const transporter = createTransporter();
+        const mailOptions = {
+            from: `"TrustBallot Security" <${process.env.EMAIL_USER}>`,
+            to: process.env.ADMIN_EMAIL || process.env.EMAIL_USER, // Fallback to sender if admin email not set
+            subject: `🚨 SECURITY ALERT: ${subject}`,
+            html: `<h3>Security Alert</h3><p>${message}</p><p>Time: ${new Date().toISOString()}</p>`
+        };
+        await transporter.sendMail(mailOptions);
+        console.log(`[ALERT] Email sent: ${subject}`);
+    } catch (error) {
+        console.error('[ALERT] Failed to send email:', error);
+    }
+};
+
+module.exports = { sendOtpEmail, sendAlertEmail };

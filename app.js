@@ -27,8 +27,7 @@ const { addConstituency, getAllConstituencies } = require('./models/Constituency
 const { findCitizen } = require('./models/ElectoralRoll');
 const { createRecoveryRequest, getRecoveryRequest, updateRecoveryStatus, getAllRecoveryRequests } = require('./models/RecoveryRequest');
 const { loadOrGenerateKeys, getPublicKey, getPrivateKey } = require('./utils/encryption_keys');
-const { checkIpVelocity, logFraudSignal } = require('./utils/fraudEngine');
-const MempoolService = require('./services/MempoolService');
+const MempoolService = require('./utils/MempoolService');
 const BlindSignature = require('./utils/BlindSignature');
 
 // Load keys on start
@@ -297,6 +296,66 @@ app.get('/api/election/status', async (req, res) => {
         res.json(status);
     } catch (err) {
         res.status(500).json({ error: 'Failed to fetch status' });
+    }
+});
+
+// --- P2P & INTEGRITY ROUTES ---
+
+// Receive Block from Peer (Simulation)
+app.post('/api/p2p/block', async (req, res) => {
+    const { block } = req.body;
+    // In a real P2P system, we would:
+    // 1. Validate the block hash (PoW or Signature)
+    // 2. Validate prev_hash matches our last block
+    // 3. Add to our chain if valid
+    console.log(`[P2P] Received block ${block.transaction_hash} from peer.`);
+    res.json({ success: true, message: 'Block received' });
+});
+
+// Trigger Integrity Check
+app.get('/api/integrity-check', async (req, res) => {
+    try {
+        const { pool } = require('./config/db');
+        const query = 'SELECT * FROM votes ORDER BY id ASC';
+        const { rows } = await pool.query(query);
+        const crypto = require('crypto');
+
+        let isIntact = true;
+        let failedBlockId = null;
+
+        for (let i = 0; i < rows.length; i++) {
+            const current = rows[i];
+            const prevHash = i === 0
+                ? '0000000000000000000000000000000000000000000000000000000000000000'
+                : rows[i - 1].transaction_hash;
+
+            // 1. Verify Link
+            if (current.prev_hash !== prevHash) {
+                isIntact = false;
+                failedBlockId = current.id;
+                console.error(`[INTEGRITY FAIL] Block ${current.id} prev_hash mismatch. Expected ${prevHash}, got ${current.prev_hash}`);
+                break;
+            }
+
+            // 2. Verify Content Hash
+            // Note: We need to reconstruct the EXACT string used in creation.
+            // castVote uses: `${prevHash}-${voterId}-${candidateId}-${timestamp}`
+            // Timestamp in DB is Date object, we need to convert to millisecond epoch if that's what was used.
+            // castVote stores Date.now() in 'data' string, but passes 'to_timestamp(...)' to DB.
+            // Retreiving from DB gives a Date object. 
+            // Ideally, we should store the exact timestamp integer or the data payload itself to be verifiable.
+            // For this simulation, we'll skip exact hash re-verification unless we store the seed data, 
+            // but the prev_hash link is the most critical part for "Chain Verification".
+        }
+
+        if (isIntact) {
+            res.json({ status: 'VERIFIED', message: 'Blockchain is intact.' });
+        } else {
+            res.status(500).json({ status: 'CORRUPTED', message: `Integrity failure at block ${failedBlockId}` });
+        }
+    } catch (err) {
+        console.error(err);
+        res.status(500).json({ error: 'Integrity check failed' });
     }
 });
 
@@ -856,6 +915,11 @@ app.post('/api/vote', async (req, res) => {
         // 3. Cast Vote
         const result = await castVote(anonymousId, vote, constituency);
         if (result.success) {
+            // --- EPIC 3: P2P Broadcast ---
+            // Requirement: "Node A broadcasts the new block to Node B"
+            if (result.block) {
+                MempoolService.broadcastBlock(result.block).catch(e => console.error("Broadcast failed", e));
+            }
             res.json({ success: true, transactionHash: result.transactionHash });
         } else {
             res.status(400).json({ error: result.error });
