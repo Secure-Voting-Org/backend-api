@@ -9,6 +9,8 @@ const app = express();
 app.use(cors());
 app.use(express.json({ limit: '50mb' }));
 
+
+
 const { findVoterById, updateVoterFace, createVoter, saveRegistrationDetails, incrementRetry, lockAccount, resetLocks } = require('./models/Voter');
 const { createLog } = require('./models/Log');
 
@@ -183,6 +185,16 @@ app.post('/api/registration/validate', async (req, res) => {
 });
 
 // 2. Submit Enrollment (Face)
+// Helper to generate 12-char alphanumeric Reference ID
+const generateReferenceId = () => {
+    const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';
+    let result = '';
+    for (let i = 0; i < 12; i++) {
+        result += chars.charAt(Math.floor(Math.random() * chars.length));
+    }
+    return result;
+};
+
 // 2. Submit Enrollment (Face & Full Details)
 app.post('/api/registration/submit', async (req, res) => {
     const {
@@ -192,9 +204,19 @@ app.post('/api/registration/submit', async (req, res) => {
     try {
         console.log("DEBUG: Received Registration Submit for Pending Queue");
 
-        // Map formData keys to DB columns for REGISTRATION table (Pending)
-        // Ensure keys match what saveRegistrationDetails expects (camelCase)
+        // Generate 12-char Reference ID
+        const referenceId = generateReferenceId();
+
+        // Helper to extract base64 from possible file object
+        const getFileBase64 = (file) => {
+            if (!file) return null;
+            if (typeof file === 'string') return file;
+            if (file.base64) return file.base64; // Handle { name, base64 } object from FormContext
+            return null;
+        };
+
         const registrationData = {
+            referenceId: referenceId, // Pass the generated ID
             aadhaar: aadhaar,
             name: `${formData.firstName} ${formData.surname}`,
             relativeName: formData.relativeName,
@@ -214,7 +236,14 @@ app.post('/api/registration/submit', async (req, res) => {
 
             disability: formData.disabilityOtherSpec || (formData.disabilityCategories?.locomotive ? 'Locomotive' : 'None'),
 
-            faceDescriptor: faceDescriptor // Model will verify array vs JSON string
+            faceDescriptor: faceDescriptor, // Model will verify array vs JSON string
+
+            // Files from formData (Base64 strings)
+            // Extract base64 if object
+            profileImage: getFileBase64(formData.image),
+            dobProof: getFileBase64(formData.dobProofFile),
+            addressProof: getFileBase64(formData.addressProofFile),
+            disabilityProof: getFileBase64(formData.disabilityFile)
         };
 
         console.log("DEBUG: Saving to voter_registrations (Pending)...");
@@ -226,37 +255,15 @@ app.post('/api/registration/submit', async (req, res) => {
 
         console.log("DEBUG: Pending Registration Success. App ID:", applicationId);
 
-        // Return success with Application ID instead of Voter ID
-        res.json({ success: true, voterId: "PENDING", referenceId: "APP" + applicationId });
+        // Return success with Reference ID
+        res.json({ success: true, voterId: "PENDING", referenceId: referenceId });
     } catch (err) {
         console.error("DEBUG: Backend Registration Error:", err);
         res.status(500).json({ error: 'Enrollment failed: ' + err.message });
     }
 });
 
-// 3. Application Status Check
-app.get('/api/application/status/:referenceId', async (req, res) => {
-    const { referenceId } = req.params;
-    try {
-        const { findVoterByReferenceId } = require('./models/Voter'); // lazy import or move top
-        const voter = await findVoterByReferenceId(referenceId);
 
-        if (!voter) {
-            return res.status(404).json({ error: 'Application not found' });
-        }
-
-        res.json({
-            success: true,
-            status: voter.status,
-            name: voter.name,
-            constituency: voter.constituency,
-            submittedAt: voter.created_at
-        });
-    } catch (err) {
-        console.error(err);
-        res.status(500).json({ error: 'Failed to fetch status' });
-    }
-});
 
 // Get Voter by ID
 app.get('/api/voter/:id', async (req, res) => {
@@ -600,6 +607,77 @@ app.post('/api/admin/recovery/approve', async (req, res) => {
         res.json({ success: true, message: 'Recovery Request Approved. User can now login.' });
     } catch (err) {
         res.status(500).json({ error: 'Approval Failed' });
+    }
+});
+
+// --- PENDING VOTER VERIFICATION ROUTES ---
+
+const { getPendingRegistrations, approveRegistration, rejectRegistration } = require('./models/Voter');
+
+// Get Pending Registrations
+app.get('/api/admin/pending-voters', async (req, res) => {
+    try {
+        const list = await getPendingRegistrations();
+        res.json(list);
+    } catch (err) {
+        console.error("Fetch Pending Error:", err);
+        res.status(500).json({ error: 'Failed to fetch pending voters' });
+    }
+});
+
+// Get Single Application Details
+const { getApplicationDetails } = require('./models/Voter');
+app.get('/api/admin/pending-voter/:id', async (req, res) => {
+    try {
+        const details = await getApplicationDetails(req.params.id);
+        if (!details) return res.status(404).json({ error: 'Application not found' });
+        res.json(details);
+    } catch (err) {
+        console.error("Fetch Detail Error:", err);
+        res.status(500).json({ error: 'Failed to fetch application details' });
+    }
+});
+
+// Approve Voter Registration
+app.post('/api/admin/approve-voter', async (req, res) => {
+    const { applicationId } = req.body;
+    try {
+        const result = await approveRegistration(applicationId);
+        res.json(result);
+    } catch (err) {
+        console.error("Approve Error:", err);
+        res.status(500).json({ error: 'Approval failed: ' + err.message });
+    }
+});
+
+// Reject Voter Registration
+app.post('/api/admin/reject-voter', async (req, res) => {
+    const { applicationId, reason } = req.body;
+    try {
+        await rejectRegistration(applicationId, reason);
+        res.json({ success: true, message: 'Application Rejected' });
+    } catch (err) {
+        console.error("Reject Error:", err);
+        res.status(500).json({ error: 'Rejection failed' });
+    }
+});
+
+// Check Application Status (Public)
+// Check Application Status (Public)
+const { getApplicationStatus } = require('./models/Voter');
+app.get('/api/application/status/:referenceId', async (req, res) => {
+    try {
+        const { referenceId } = req.params;
+        const status = await getApplicationStatus(referenceId);
+
+        if (!status) {
+            return res.status(404).json({ success: false, error: 'Application not found with this Reference ID' });
+        }
+
+        res.json({ success: true, ...status });
+    } catch (err) {
+        console.error("Status Check Error:", err);
+        res.status(500).json({ error: 'Failed to check status' });
     }
 });
 

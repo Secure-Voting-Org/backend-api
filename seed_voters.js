@@ -11,7 +11,7 @@ const seedVoters = async () => {
         console.log("Connected to DB.");
 
         // Clear existing voters
-        await pool.query('TRUNCATE TABLE voters RESTART IDENTITY');
+        await pool.query('TRUNCATE TABLE voters RESTART IDENTITY CASCADE');
         console.log("Cleared old voters.");
 
         // Create table just in case

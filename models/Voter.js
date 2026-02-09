@@ -72,12 +72,76 @@ const createRegistrationTable = async () => {
         disability_details TEXT,
         face_descriptor_temp JSON, -- Store face here temporarily
         status VARCHAR(20) DEFAULT 'PENDING', -- PENDING, APPROVED, REJECTED
+        rejection_reason TEXT, -- Reason for rejection
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
     )`;
     await pool.query(query);
 };
 
-// ... (existing functions)
+// Find Voter by ID
+const findVoterById = async (id) => {
+    const { rows } = await pool.query('SELECT * FROM voters WHERE id = $1', [id]);
+    return rows[0];
+};
+
+// Find Voter by Reference ID
+const findVoterByReferenceId = async (referenceId) => {
+    const { rows } = await pool.query('SELECT * FROM voters WHERE reference_id = $1', [referenceId]);
+    return rows[0];
+};
+
+// Create New Voter (Main Table)
+// Create New Voter (Main Table)
+const createVoter = async (voterData) => {
+    const {
+        id, reference_id, name, surname, gender, dob, constituency, face_descriptor,
+        mobile, email, address, district, state, pincode,
+        relative_name, relative_type, disability_type,
+        profile_image_data, dob_proof_data, address_proof_data, disability_proof_data
+    } = voterData;
+
+    const query = `
+        INSERT INTO voters (
+            id, reference_id, name, surname, gender, dob, constituency, face_descriptor,
+            mobile, email, address, district, state, pincode,
+            relative_name, relative_type, disability_type,
+            profile_image_data, dob_proof_data, address_proof_data, disability_proof_data
+        ) VALUES (
+            $1, $2, $3, $4, $5, $6, $7, $8,
+            $9, $10, $11, $12, $13, $14,
+            $15, $16, $17,
+            $18, $19, $20, $21
+        ) RETURNING id`;
+
+    const params = [
+        id, reference_id, name, surname, gender, dob, constituency,
+        face_descriptor ? JSON.stringify(face_descriptor) : null,
+        mobile, email, address, district, state, pincode,
+        relative_name, relative_type, disability_type,
+        profile_image_data, dob_proof_data, address_proof_data, disability_proof_data
+    ];
+
+    // Ensure undefined values are null for PG
+    await pool.query(query, params.map(p => p === undefined ? null : p));
+};
+
+// Increment Retry Count
+const incrementRetry = async (voterId) => {
+    const query = 'UPDATE voters SET retry_count = retry_count + 1 WHERE id = $1 RETURNING retry_count';
+    const { rows } = await pool.query(query, [voterId]);
+    return rows[0] ? rows[0].retry_count : 0;
+};
+
+// Lock Account
+const lockAccount = async (voterId, minutes) => {
+    const lockedUntil = new Date(Date.now() + minutes * 60000);
+    await pool.query('UPDATE voters SET locked_until = $1 WHERE id = $2', [lockedUntil, voterId]);
+};
+
+// Reset Locks
+const resetLocks = async (voterId) => {
+    await pool.query('UPDATE voters SET retry_count = 0, locked_until = NULL WHERE id = $1', [voterId]);
+};
 
 // Save Full Registration Details (Pending Verification)
 const saveRegistrationDetails = async (details) => {
@@ -85,13 +149,14 @@ const saveRegistrationDetails = async (details) => {
         referenceId, // Expect referenceId from controller
         aadhaar, name, relativeName, relativeType,
         state, district, constituency, dob, gender,
-        mobile, email, address, disability, faceDescriptor
+        mobile, email, address, disability, faceDescriptor,
+        profileImage, dobProof, addressProof, disabilityProof // New fields
     } = details;
 
     const query = `
         INSERT INTO voter_registrations 
-        (reference_id, aadhaar_number, full_name, relative_name, relative_type, state, district, constituency, dob, gender, mobile, email, address, disability_details, face_descriptor_temp, status)
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, 'PENDING')
+        (reference_id, aadhaar_number, full_name, relative_name, relative_type, state, district, constituency, dob, gender, mobile, email, address, disability_details, face_descriptor_temp, profile_image_data, dob_proof_data, address_proof_data, disability_proof_data, status)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, 'PENDING')
         RETURNING application_id
     `;
 
@@ -99,7 +164,8 @@ const saveRegistrationDetails = async (details) => {
         referenceId, // $1
         aadhaar, name, relativeName, relativeType,
         state, district, constituency, dob, gender,
-        mobile, email, address, disability, JSON.stringify(faceDescriptor)
+        mobile, email, address, disability, JSON.stringify(faceDescriptor),
+        profileImage, dobProof, addressProof, disabilityProof
     ]);
     return rows[0].application_id;
 };
@@ -110,4 +176,121 @@ const updateVoterFace = async (voterId, faceDescriptor) => {
     await pool.query(query, [JSON.stringify(faceDescriptor), voterId]);
 };
 
-module.exports = { createVoterTable, createRegistrationTable, findVoterById, findVoterByReferenceId, createVoter, saveRegistrationDetails, updateVoterFace, incrementRetry, lockAccount, resetLocks };
+// Get Pending Registrations
+// Get Pending Registrations (Lightweight for List View)
+const getPendingRegistrations = async () => {
+    // Exclude heavy base64 columns
+    const query = `
+        SELECT application_id, reference_id, full_name, constituency, aadhaar_number, created_at 
+        FROM voter_registrations 
+        WHERE status = 'PENDING' 
+        ORDER BY created_at DESC
+    `;
+    const { rows } = await pool.query(query);
+    return rows;
+};
+
+// Get Full Application Details (including images)
+const getApplicationDetails = async (applicationId) => {
+    const query = "SELECT * FROM voter_registrations WHERE application_id = $1";
+    const { rows } = await pool.query(query, [applicationId]);
+    return rows[0];
+};
+
+// Approve Registration (Move from Registration to Main Voter Table)
+const approveRegistration = async (applicationId) => {
+    const client = await pool.connect();
+    try {
+        await client.query('BEGIN');
+
+        // 1. Get Application Details
+        const resApp = await client.query("SELECT * FROM voter_registrations WHERE application_id = $1", [applicationId]);
+        const app = resApp.rows[0];
+
+        if (!app) throw new Error("Application not found");
+        if (app.status !== 'PENDING') throw new Error("Application is not pending");
+
+        // 2. Generate Voter ID (Format: RDV + 7 Random Digits)
+        const voterId = `RDV${Math.floor(1000000 + Math.random() * 9000000)}`;
+
+        // 3. Insert into Voters Table
+        const insertQuery = `
+            INSERT INTO voters (
+                id, reference_id, name, surname, gender, dob, constituency, face_descriptor,
+                mobile, email, address, district, state,
+                relative_name, relative_type, disability_type,
+                profile_image_data, dob_proof_data, address_proof_data, disability_proof_data,
+                status
+            ) VALUES (
+                $1, $2, $3, $4, $5, $6, $7, $8,
+                $9, $10, $11, $12, $13,
+                $14, $15, $16,
+                $17, $18, $19, $20,
+                'APPROVED'
+            )
+        `;
+
+        // Parse name into Name + Surname if needed, or just use full name as Name
+        // The registration table has full_name. The voters table has name, surname.
+        // We will just use full_name in name and empty surname for simplicity or split.
+
+        await client.query(insertQuery, [
+            voterId, app.reference_id, app.full_name, '', app.gender, app.dob, app.constituency, JSON.stringify(app.face_descriptor_temp),
+            app.mobile, app.email, app.address, app.district, app.state,
+            app.relative_name, app.relative_type, app.disability_details,
+            app.profile_image_data, app.dob_proof_data, app.address_proof_data, app.disability_proof_data
+        ]);
+
+        // 4. Update Registration Status
+        await client.query("UPDATE voter_registrations SET status = 'APPROVED', voter_id = $1 WHERE application_id = $2", [voterId, applicationId]);
+
+        await client.query('COMMIT');
+        return { success: true, voterId };
+    } catch (e) {
+        await client.query('ROLLBACK');
+        throw e;
+    } finally {
+        client.release();
+    }
+};
+
+// Reject Registration
+const rejectRegistration = async (applicationId, reason) => {
+    const query = "UPDATE voter_registrations SET status = 'REJECTED', rejection_reason = $2 WHERE application_id = $1";
+    await pool.query(query, [applicationId, reason || 'Rejected by Admin']);
+};
+
+// Get Application Status by Reference ID
+const getApplicationStatus = async (referenceId) => {
+    // Check both pending registration table and approved voters table
+
+    // 1. Check Pending/Rejected in Registration Table
+    const resReg = await pool.query(
+        "SELECT status, rejection_reason, full_name as name, constituency, voter_id FROM voter_registrations WHERE reference_id = $1",
+        [referenceId]
+    );
+
+    if (resReg.rows.length > 0) {
+        return resReg.rows[0];
+    }
+
+    // 2. Check Approved in Main Voters Table
+    const resVoter = await pool.query(
+        "SELECT status, id as voter_id, name, surname, constituency FROM voters WHERE reference_id = $1",
+        [referenceId]
+    );
+
+    if (resVoter.rows.length > 0) {
+        const v = resVoter.rows[0];
+        return {
+            status: 'APPROVED',
+            voter_id: v.voter_id,
+            name: `${v.name} ${v.surname}`.trim(),
+            constituency: v.constituency
+        };
+    }
+
+    return null; // Not found
+};
+
+module.exports = { createVoterTable, createRegistrationTable, findVoterById, findVoterByReferenceId, createVoter, saveRegistrationDetails, updateVoterFace, incrementRetry, lockAccount, resetLocks, getPendingRegistrations, getApplicationDetails, approveRegistration, rejectRegistration, getApplicationStatus };
