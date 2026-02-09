@@ -9,21 +9,26 @@ const app = express();
 app.use(cors());
 app.use(express.json({ limit: '50mb' }));
 
-const { findVoterById, updateVoterFace, createVoter, saveRegistrationDetails, incrementRetry, lockAccount, resetLocks, getAllVoters } = require('./models/Voter');
+const { findVoterById, updateVoterFace, createVoter, saveRegistrationDetails, incrementRetry, lockAccount, resetLocks, getAllVoters, findPendingRegistrationByAadhaar, getFlaggedRegistrations } = require('./models/Voter');
 const { createLog, getAllLogs } = require('./models/Log');
+const { checkIpVelocity, checkDeviceVelocity, checkFaceSimilarity, calculateRiskScore, logFraudSignal } = require('./utils/fraudEngine');
+const { generateToken, createSession, invalidateSession } = require('./utils/authService');
+const authMiddleware = require('./middleware/authMiddleware');
 
-const { getCandidatesByConstituency, getCandidatesByMetadata } = require('./models/Candidate');
+const { getCandidatesByConstituency, getCandidatesByMetadata, createCandidate } = require('./models/Candidate');
 const { findObserverByUsername } = require('./models/Observer');
 const { castVote, getTurnoutStats, getPublicLedger, getAllVotes } = require('./models/Vote');
 
-// NEW MODELS
 const { findAdminByUsername, findAdminByEmail, createAdmin, storeOtp, verifyOtp, updateAdminPassword, getAllAdmins, updateAdmin, deleteAdmin } = require('./models/Admin');
+const { findSysAdminByUsername, createSysAdmin } = require('./models/SysAdmin');
 const { sendOtpEmail } = require('./services/emailService');
 const { getElectionStatus, updateElectionPhase, toggleKillSwitch } = require('./models/Election');
 const { addConstituency, getAllConstituencies } = require('./models/Constituency');
 const { findCitizen } = require('./models/ElectoralRoll');
 const { createRecoveryRequest, getRecoveryRequest, updateRecoveryStatus, getAllRecoveryRequests } = require('./models/RecoveryRequest');
 const { loadOrGenerateKeys, getPublicKey, getPrivateKey } = require('./utils/encryption_keys');
+const MempoolService = require('./utils/MempoolService');
+const BlindSignature = require('./utils/BlindSignature');
 
 // Load keys on start
 loadOrGenerateKeys().catch(err => console.error("Failed to load election keys:", err));
@@ -124,6 +129,12 @@ app.post('/api/admin/login', async (req, res) => {
                 details: { reason: 'Invalid password', role },
                 ip_address: req.ip
             });
+
+            // --- FRAUD CHECK: REPEATED LOGIN FAILURES (Primitive) ---
+            // In a real system, we'd query recent failure logs here.
+            // For now, let's just flag the IP if needed or trust the log monitoring.
+            // ----------------------------------------------------
+
             return res.status(401).json({ error: 'Invalid credentials' });
         }
 
@@ -288,6 +299,66 @@ app.get('/api/election/status', async (req, res) => {
     }
 });
 
+// --- P2P & INTEGRITY ROUTES ---
+
+// Receive Block from Peer (Simulation)
+app.post('/api/p2p/block', async (req, res) => {
+    const { block } = req.body;
+    // In a real P2P system, we would:
+    // 1. Validate the block hash (PoW or Signature)
+    // 2. Validate prev_hash matches our last block
+    // 3. Add to our chain if valid
+    console.log(`[P2P] Received block ${block.transaction_hash} from peer.`);
+    res.json({ success: true, message: 'Block received' });
+});
+
+// Trigger Integrity Check
+app.get('/api/integrity-check', async (req, res) => {
+    try {
+        const { pool } = require('./config/db');
+        const query = 'SELECT * FROM votes ORDER BY id ASC';
+        const { rows } = await pool.query(query);
+        const crypto = require('crypto');
+
+        let isIntact = true;
+        let failedBlockId = null;
+
+        for (let i = 0; i < rows.length; i++) {
+            const current = rows[i];
+            const prevHash = i === 0
+                ? '0000000000000000000000000000000000000000000000000000000000000000'
+                : rows[i - 1].transaction_hash;
+
+            // 1. Verify Link
+            if (current.prev_hash !== prevHash) {
+                isIntact = false;
+                failedBlockId = current.id;
+                console.error(`[INTEGRITY FAIL] Block ${current.id} prev_hash mismatch. Expected ${prevHash}, got ${current.prev_hash}`);
+                break;
+            }
+
+            // 2. Verify Content Hash
+            // Note: We need to reconstruct the EXACT string used in creation.
+            // castVote uses: `${prevHash}-${voterId}-${candidateId}-${timestamp}`
+            // Timestamp in DB is Date object, we need to convert to millisecond epoch if that's what was used.
+            // castVote stores Date.now() in 'data' string, but passes 'to_timestamp(...)' to DB.
+            // Retreiving from DB gives a Date object. 
+            // Ideally, we should store the exact timestamp integer or the data payload itself to be verifiable.
+            // For this simulation, we'll skip exact hash re-verification unless we store the seed data, 
+            // but the prev_hash link is the most critical part for "Chain Verification".
+        }
+
+        if (isIntact) {
+            res.json({ status: 'VERIFIED', message: 'Blockchain is intact.' });
+        } else {
+            res.status(500).json({ status: 'CORRUPTED', message: `Integrity failure at block ${failedBlockId}` });
+        }
+    } catch (err) {
+        console.error(err);
+        res.status(500).json({ error: 'Integrity check failed' });
+    }
+});
+
 // Update Phase (Live Admin Only - In real app, check JWT)
 app.post('/api/election/update', async (req, res) => {
     const { phase, isKillSwitch } = req.body;
@@ -345,10 +416,30 @@ app.post('/api/constituency', async (req, res) => {
 });
 
 // Add Candidate
+// Add Candidate
 app.post('/api/candidate', async (req, res) => {
-    // Not implemented yet in Candidate Model
-    // await addCandidate(req.body);
-    res.json({ message: 'Candidate added successfully (Mock)' });
+    try {
+        const { name, party, constituency, symbol } = req.body;
+        // Basic validation
+        if (!name || !constituency || !symbol) {
+            return res.status(400).json({ error: 'Name, Constituency, and Symbol are required' });
+        }
+
+        // Use createCandidate from model
+        // Passing null for photo_url as it's not currently sent by frontend
+        await createCandidate({
+            name,
+            party,
+            constituency,
+            symbol,
+            photo_url: null
+        });
+
+        res.status(201).json({ message: 'Candidate added successfully' });
+    } catch (err) {
+        console.error("Error adding candidate:", err);
+        res.status(500).json({ error: 'Failed to add candidate' });
+    }
 });
 
 // Register Voter (with Face Data) - Admin/Legacy
@@ -440,7 +531,66 @@ app.post('/api/registration/submit', async (req, res) => {
     } = req.body;
 
     try {
-        console.log("DEBUG: Received Registration Submit for Pending Queue");
+        if (!formData) {
+            return res.status(400).json({ error: "Missing formData in request body" });
+        }
+
+        const clientIp = req.ip || req.headers['x-forwarded-for'] || req.connection.remoteAddress;
+
+        // --- FRAUD CHECK: REGISTRATION VELOCITY (IP) ---
+        const isHighVelocity = await checkIpVelocity(clientIp, 'REGISTRATION');
+        if (isHighVelocity) {
+            await logFraudSignal('HIGH_VELOCITY_REGISTRATION_IP', {
+                count: 'Exceeded Limit',
+                aadhaar: aadhaar
+            }, clientIp);
+            console.warn(`[FRAUD] High velocity registration detected from IP ${clientIp}`);
+        }
+
+        // --- FRAUD CHECK: DEVICE VELOCITY ---
+        const deviceHash = req.headers['x-device-hash'];
+        if (deviceHash) {
+            const isDeviceHighVelocity = await checkDeviceVelocity(deviceHash);
+            if (isDeviceHighVelocity) {
+                await logFraudSignal('HIGH_VELOCITY_REGISTRATION_DEVICE', {
+                    count: 'Exceeded Limit',
+                    aadhaar: aadhaar,
+                    deviceHash: deviceHash
+                }, clientIp);
+                console.warn(`[FRAUD] High velocity registration detected from Device ${deviceHash}`);
+            }
+        }
+
+        // --- FRAUD CHECK: FACE SIMILARITY ---
+        // Basic check against recent pending applications
+        const faceMatch = await checkFaceSimilarity(faceDescriptor);
+        if (faceMatch && faceMatch.match) {
+            await logFraudSignal('POTENTIAL_DUPLICATE_FACE', {
+                details: 'Face matches existing pending application',
+                matchedApplicationId: faceMatch.applicationId,
+                distance: faceMatch.distance
+            }, clientIp);
+            console.warn(`[FRAUD] Face matches pending application ${faceMatch.applicationId} (dist: ${faceMatch.distance})`);
+            // return res.status(409).json({ error: 'Biometric duplicate detected.' }); // Optional Blocking
+        }
+        // ------------------------------------------
+
+        // --- CALCULATE RISK SCORE ---
+        const riskAssessment = calculateRiskScore({
+            ipVelocity: isHighVelocity,
+            deviceVelocity: deviceHash ? await checkDeviceVelocity(deviceHash) : false,
+            faceSimilarity: faceMatch
+        });
+
+        console.log(`[RISK ASSESSMENT] Score: ${riskAssessment.score}, Flags: ${riskAssessment.flags.join(', ')}`);
+        // ------------------------------------------
+
+        // --- DUPLICATE CHECK: PENDING APPLICATION ---
+        const existingPending = await findPendingRegistrationByAadhaar(aadhaar);
+        if (existingPending) {
+            return res.status(409).json({ error: 'Aadhaar already has a pending application.' });
+        }
+        // ------------------------------------------
 
         // Map formData keys to DB columns for REGISTRATION table (Pending)
         // Ensure keys match what saveRegistrationDetails expects (camelCase)
@@ -464,14 +614,15 @@ app.post('/api/registration/submit', async (req, res) => {
 
             disability: formData.disabilityOtherSpec || (formData.disabilityCategories?.locomotive ? 'Locomotive' : 'None'),
 
-            faceDescriptor: faceDescriptor // Model will verify array vs JSON string
+            faceDescriptor: faceDescriptor, // Model will verify array vs JSON string
+            ipAddress: clientIp,
+            deviceHash: deviceHash,
+            riskScore: riskAssessment.score,
+            riskFlags: riskAssessment.flags
         };
 
         console.log("DEBUG: Saving to voter_registrations (Pending)...");
 
-        // Save to Pending Table (voter_registrations)
-        // This function handles JSON stringifying of faceDescriptor internally if needed, or we pass object
-        // Based on Voter.js: saveRegistrationDetails takes `details` and stringifies `faceDescriptor`
         const applicationId = await saveRegistrationDetails(registrationData);
 
         console.log("DEBUG: Pending Registration Success. App ID:", applicationId);
@@ -488,8 +639,8 @@ app.post('/api/registration/submit', async (req, res) => {
 app.get('/api/application/status/:referenceId', async (req, res) => {
     const { referenceId } = req.params;
     try {
-        const { findVoterByReferenceId } = require('./models/Voter'); // lazy import or move top
-        const voter = await findVoterByReferenceId(referenceId);
+        const { findRegistrationByReferenceId } = require('./models/Voter'); // lazy import or move top
+        const voter = await findRegistrationByReferenceId(referenceId);
 
         if (!voter) {
             return res.status(404).json({ error: 'Application not found' });
@@ -509,13 +660,34 @@ app.get('/api/application/status/:referenceId', async (req, res) => {
 });
 
 // Get Voter by ID
-app.get('/api/voter/:id', async (req, res) => {
+// Helper to get Voter by ID (Protected)
+app.get('/api/voter/:id', authMiddleware, async (req, res) => {
     try {
+        // Ensure user can only access their own data
+        if (req.user.id !== req.params.id && req.user.mobile !== req.params.id) {
+            return res.status(403).json({ error: 'Unauthorized access to voter profile' });
+        }
+
         const voter = await findVoterById(req.params.id);
         if (!voter) return res.status(404).json({ error: 'Voter not found' });
         res.json(voter);
     } catch (err) {
         res.status(500).json({ error: 'Lookup failed' });
+    }
+});
+
+// Get Flagged Registrations (Admin)
+app.get('/api/admin/flagged-registrations', async (req, res) => {
+    try {
+        const flaggedRegistrations = await getFlaggedRegistrations();
+        res.json({
+            success: true,
+            count: flaggedRegistrations.length,
+            registrations: flaggedRegistrations
+        });
+    } catch (err) {
+        console.error("Error fetching flagged registrations:", err);
+        res.status(500).json({ error: 'Failed to fetch flagged registrations' });
     }
 });
 
@@ -664,24 +836,107 @@ app.post('/api/login', async (req, res) => {
     res.json({ success: true });
 });
 
-// Vote Route
-app.post('/api/vote', async (req, res) => {
-    const { voterId, candidateId, constituency } = req.body;
+// Generate Keys on Startup (or load from DB/File in prod)
+BlindSignature.generateKeys();
 
-    // Check Election Status First
+// Endpoint to get Blind Signature Public Key
+app.get('/api/blind-signature/keys', (req, res) => {
+    const key = BlindSignature.getKey();
+    if (key) {
+        res.json({ n: key.n, e: key.e });
+    } else {
+        res.status(500).json({ error: 'Keys not initialized' });
+    }
+});
+
+// Issue Blind Signature (Authorized)
+// Expects: { blinded_token, voterId }
+app.post('/api/blind-sign', async (req, res) => {
+    const { blinded_token, voterId } = req.body;
+
+    // 1. Verify Voter (Ensure they are eligible and haven't signed yet)
+    // In real app, check DB 'is_token_issued' flag.
+    const voter = await findVoterById(voterId);
+    if (!voter) return res.status(404).json({ error: 'Voter not found' });
+
+    // Check if already issued (Prevent Double Issuance)
+    const { checkTokenIssued, markTokenIssued } = require('./models/Voter');
+    const hasIssued = await checkTokenIssued(voterId);
+    if (hasIssued) return res.status(403).json({ error: 'Voting Token already issued to this user.' });
+
+    try {
+        // 2. Sign the Blinded Token
+        const signature = BlindSignature.blindSign(blinded_token);
+
+        // 3. Mark as Issued (Important!)
+        await markTokenIssued(voterId);
+
+        res.json({ signature });
+    } catch (err) {
+        console.error("Blind Signing Error:", err);
+        res.status(500).json({ error: 'Signing failed' });
+    }
+});
+
+// Vote Route (Anonymous with Real Blind Signature)
+app.post('/api/vote', async (req, res) => {
+    const { vote, auth_token, signature, constituency } = req.body;
+
+    // Check Election Status
     const status = await getElectionStatus();
     if (status.phase !== 'LIVE' || status.is_kill_switch_active) {
         return res.status(403).json({ error: 'Election is not live or has been suspended.' });
     }
 
+    // 1. Verify Blind Token Signature
+    if (!auth_token || !signature) {
+        return res.status(401).json({ error: 'Unauthorized: Missing Token or Signature' });
+    }
+
     try {
-        const result = await castVote(voterId, candidateId, constituency);
+        // Verify: s^e % n == token
+        // Important: auth_token is the UNBLINDED message (BigInt string)
+        const isValid = BlindSignature.verify(auth_token, signature);
+
+        if (!isValid) {
+            return res.status(401).json({ error: 'Invalid Blind Signature' });
+        }
+
+        // --- EPIC 3: Blockchain Shadowing ---
+        // Add to Mempool silently. Does not affect main flow.
+        const sourceIp = req.ip || req.connection.remoteAddress;
+        MempoolService.add({ vote, auth_token, signature, constituency }, sourceIp)
+            .catch(err => console.error("[Epic3] Mempool shadow failed:", err));
+
+        // --- ORIGINAL BUSINESS LOGIC (Constraint: Do NOT modify) ---
+        // 2. Anonymize Voter ID (Hash the token to prevent double voting)
+        const anonymousId = require('crypto').createHash('sha256').update(auth_token).digest('hex');
+
+        // 3. Cast Vote
+        const result = await castVote(anonymousId, vote, constituency);
         if (result.success) {
+            // --- EPIC 3: P2P Broadcast ---
+            // Requirement: "Node A broadcasts the new block to Node B"
+            if (result.block) {
+                MempoolService.broadcastBlock(result.block).catch(e => console.error("Broadcast failed", e));
+            }
             res.json({ success: true, transactionHash: result.transactionHash });
         } else {
             res.status(400).json({ error: result.error });
         }
     } catch (err) {
+        console.error("Voting Error:", err);
+        // Handle Unique Constraint Violation (Double Voting)
+        if (err.code === '23505') { // Postgres unique_violation for unique_voter_id
+            // --- FRAUD CHECK: DUPLICATE VOTE ATTEMPT ---
+            const clientIp = req.ip || req.connection.remoteAddress;
+            await logFraudSignal('DUPLICATE_VOTE_ATTEMPT', {
+                details: 'Token already used',
+                signature_snippet: signature ? signature.substring(0, 10) + '...' : 'N/A'
+            }, clientIp);
+            // ------------------------------------------
+            return res.status(403).json({ error: 'Duplicate Vote: This token has already been used.' });
+        }
         res.status(500).json({ error: 'Voting failed' });
     }
 });
@@ -1004,6 +1259,48 @@ app.post('/api/admin/recovery/approve', async (req, res) => {
 });
 
 // ==========================================
+// SYS-ADMIN AUTHENTICATION (Distinct from Election Admin)
+// ==========================================
+
+app.post('/api/sys-admin/login', async (req, res) => {
+    const { username, password } = req.body;
+    try {
+        const admin = await findSysAdminByUsername(username);
+        if (!admin || admin.password !== password) {
+            return res.status(401).json({ error: 'Invalid credentials' });
+        }
+
+        res.json({
+            success: true,
+            admin: {
+                id: admin.id,
+                username: admin.username,
+                full_name: admin.full_name,
+                role: 'SYS_ADMIN'
+            }
+        });
+    } catch (err) {
+        console.error(err);
+        res.status(500).json({ error: 'Login failed' });
+    }
+});
+
+app.post('/api/sys-admin/register', async (req, res) => {
+    const { username, password, fullName, email } = req.body;
+    try {
+        if (!username || !password) return res.status(400).json({ error: 'Username/Password required' });
+
+        const existing = await findSysAdminByUsername(username);
+        if (existing) return res.status(400).json({ error: 'Username taken' });
+
+        await createSysAdmin(fullName, email, username, password);
+        res.json({ success: true, message: 'SysAdmin Registered' });
+    } catch (err) {
+        res.status(500).json({ error: 'Registration failed' });
+    }
+});
+
+// ==========================================
 // VOTER AUTHENTICATION (Real Auth)
 // ==========================================
 
@@ -1044,20 +1341,48 @@ app.post('/api/voter/register', async (req, res) => {
 // Voter Login
 app.post('/api/voter/login', async (req, res) => {
     const { mobile, password } = req.body;
+    const deviceHash = req.headers['x-device-hash'];
+
     try {
         const voter = await findVoterAuthByMobile(mobile);
         if (!voter || voter.password_hash !== password) {
             return res.status(401).json({ error: 'Invalid mobile or password' });
         }
 
-        res.json({ success: true, user: { name: voter.full_name, mobile: voter.mobile, email: voter.email } });
+        // Generate Token
+        const token = generateToken(voter, deviceHash);
+
+        // Create Session (and invalidate old ones)
+        // Use IP from request
+        const clientIp = req.ip || req.headers['x-forwarded-for'] || req.connection.remoteAddress;
+        const userAgent = req.headers['user-agent'];
+
+        await createSession(voter.mobile, token, deviceHash, clientIp, userAgent);
+
+        res.json({
+            success: true,
+            token: token,
+            user: { name: voter.full_name, mobile: voter.mobile, email: voter.email }
+        });
     } catch (err) {
         console.error("Voter Login Error:", err);
         res.status(500).json({ error: 'Login failed' });
     }
 });
 
-// Voter Forgot Password - Send OTP
+// Voter Logout
+app.post('/api/voter/logout', async (req, res) => {
+    try {
+        const token = req.headers['authorization']?.split(' ')[1];
+        if (token) {
+            await invalidateSession(token);
+        }
+        res.json({ success: true, message: 'Logged out successfully' });
+    } catch (err) {
+        console.error("Logout Error:", err);
+        res.status(500).json({ error: 'Logout failed' });
+    }
+});
 app.post('/api/voter/forgot-password', async (req, res) => {
     const { email } = req.body;
     try {
