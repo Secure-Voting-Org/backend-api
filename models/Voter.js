@@ -77,57 +77,15 @@ const createRegistrationTable = async () => {
         status VARCHAR(20) DEFAULT 'PENDING', -- PENDING, APPROVED, REJECTED
         rejection_reason TEXT, -- Reason for rejection
         ip_address VARCHAR(45),
+        device_hash VARCHAR(100),
+        risk_score INTEGER DEFAULT 0,
+        risk_flags JSON,
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
     )`;
     await pool.query(query);
 };
 
-// Find Voter by ID
-const findVoterById = async (id) => {
-    const { rows } = await pool.query('SELECT * FROM voters WHERE id = $1', [id]);
-    return rows[0];
-};
 
-// Find Voter by Reference ID
-const findVoterByReferenceId = async (referenceId) => {
-    const { rows } = await pool.query('SELECT * FROM voters WHERE reference_id = $1', [referenceId]);
-    return rows[0];
-};
-
-// Create New Voter (Main Table)
-// Create New Voter (Main Table)
-const createVoter = async (voterData) => {
-    const {
-        id, reference_id, name, surname, gender, dob, constituency, face_descriptor,
-        mobile, email, address, district, state, pincode,
-        relative_name, relative_type, disability_type,
-        profile_image_data, dob_proof_data, address_proof_data, disability_proof_data
-    } = voterData;
-
-    const query = `
-        INSERT INTO voters (
-            id, reference_id, name, surname, gender, dob, constituency, face_descriptor,
-            mobile, email, address, district, state, pincode,
-            relative_name, relative_type, disability_type,
-            profile_image_data, dob_proof_data, address_proof_data, disability_proof_data
-        ) VALUES (
-            $1, $2, $3, $4, $5, $6, $7, $8,
-            $9, $10, $11, $12, $13, $14,
-            $15, $16, $17,
-            $18, $19, $20, $21
-        ) RETURNING id`;
-
-    const params = [
-        id, reference_id, name, surname, gender, dob, constituency,
-        face_descriptor ? JSON.stringify(face_descriptor) : null,
-        mobile, email, address, district, state, pincode,
-        relative_name, relative_type, disability_type,
-        profile_image_data, dob_proof_data, address_proof_data, disability_proof_data
-    ];
-
-    // Ensure undefined values are null for PG
-    await pool.query(query, params.map(p => p === undefined ? null : p));
-};
 
 // --- VOTER LOOKUP HELPERS ---
 
@@ -232,13 +190,14 @@ const saveRegistrationDetails = async (details) => {
         aadhaar, name, relativeName, relativeType,
         state, district, constituency, dob, gender,
         mobile, email, address, disability, faceDescriptor,
-        profileImage, dobProof, addressProof, disabilityProof // New fields
+        profileImage, dobProof, addressProof, disabilityProof, // New fields
+        ipAddress, deviceHash, riskScore, riskFlags // Fraud fields
     } = details;
 
     const query = `
         INSERT INTO voter_registrations 
-        (reference_id, aadhaar_number, full_name, relative_name, relative_type, state, district, constituency, dob, gender, mobile, email, address, disability_details, face_descriptor_temp, profile_image_data, dob_proof_data, address_proof_data, disability_proof_data, status)
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, 'PENDING')
+        (reference_id, aadhaar_number, full_name, relative_name, relative_type, state, district, constituency, dob, gender, mobile, email, address, disability_details, face_descriptor_temp, profile_image_data, dob_proof_data, address_proof_data, disability_proof_data, ip_address, device_hash, risk_score, risk_flags, status)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, 'PENDING')
         RETURNING application_id
     `;
 
@@ -247,7 +206,8 @@ const saveRegistrationDetails = async (details) => {
         aadhaar, name, relativeName, relativeType,
         state, district, constituency, dob, gender,
         mobile, email, address, disability, JSON.stringify(faceDescriptor),
-        profileImage, dobProof, addressProof, disabilityProof
+        profileImage, dobProof, addressProof, disabilityProof,
+        ipAddress, deviceHash, riskScore, JSON.stringify(riskFlags)
     ]);
     return rows[0].application_id;
 };
@@ -375,7 +335,7 @@ const getApplicationStatus = async (referenceId) => {
     return null; // Not found
 };
 
-module.exports = { createVoterTable, createRegistrationTable, findVoterById, findVoterByReferenceId, createVoter, saveRegistrationDetails, updateVoterFace, incrementRetry, lockAccount, resetLocks, getPendingRegistrations, getApplicationDetails, approveRegistration, rejectRegistration, getApplicationStatus };
+
 
 
 
