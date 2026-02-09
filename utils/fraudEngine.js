@@ -1,4 +1,4 @@
-const { pool } = require('../config/db');
+const db = require('../config/db');
 const { createLog } = require('../models/Log');
 
 // Configurable thresholds
@@ -14,7 +14,7 @@ const FRAUD_CONFIG = {
  * @param {string} actionType - 'REGISTRATION' or 'VOTE'.
  * @returns {Promise<boolean>} - True if limit exceeded, False otherwise.
  */
-const checkIpVelocity = async (ipAddress, actionType) => {
+const checkIpVelocity = async (ipAddress, actionType, pool = db.pool) => {
     if (!ipAddress) return false;
 
     let table, timeColumn;
