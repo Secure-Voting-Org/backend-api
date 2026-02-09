@@ -1,4 +1,7 @@
+// Voter Model: Handles user data, registration, and authentication
 const { pool } = require('../config/db');
+
+// --- DATABASE SCHEMAS ---
 
 // Create Voters Table if not exists
 const createVoterTable = async () => {
@@ -78,6 +81,8 @@ const createRegistrationTable = async () => {
     await pool.query(query);
 };
 
+// --- VOTER LOOKUP HELPERS ---
+
 // Find Voter by ID
 const findVoterById = async (id) => {
     const query = 'SELECT * FROM voters WHERE id = $1';
@@ -104,6 +109,8 @@ const findPendingRegistrationByAadhaar = async (aadhaar) => {
     const { rows } = await pool.query(query, [aadhaar]);
     return rows[0];
 };
+
+// --- CORE VOTER CREATION ---
 
 // Create Voter (Approved/Full Profile)
 const createVoter = async (voter) => {
@@ -134,6 +141,8 @@ const createVoter = async (voter) => {
     const { rows } = await pool.query(query, values);
     return rows[0];
 };
+
+// --- ACCOUNT SECURITY ---
 
 // Increment Retry Count
 const incrementRetry = async (voterId) => {
@@ -166,6 +175,8 @@ const resetLocks = async (voterId) => {
     const query = 'UPDATE voters SET retry_count = 0, locked_until = NULL WHERE id = $1';
     await pool.query(query, [voterId]);
 };
+
+// --- REGISTRATION FLOW ---
 
 // Save Full Registration Details (Pending Verification)
 const saveRegistrationDetails = async (details) => {
@@ -209,6 +220,8 @@ const findVoterByEmail = async (email) => {
     const { rows } = await pool.query(query, [email]);
     return rows[0];
 };
+
+// --- VOTER AUTHENTICATION (Login) ---
 
 // Create Voter Auth Table (Pre-registration)
 const createVoterAuthTable = async () => {
