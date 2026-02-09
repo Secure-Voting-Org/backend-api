@@ -25,6 +25,7 @@ const { findCitizen } = require('./models/ElectoralRoll');
 const { createRecoveryRequest, getRecoveryRequest, updateRecoveryStatus, getAllRecoveryRequests } = require('./models/RecoveryRequest');
 const { loadOrGenerateKeys, getPublicKey, getPrivateKey } = require('./utils/encryption_keys');
 const { checkIpVelocity, logFraudSignal } = require('./utils/fraudEngine');
+const MempoolService = require('./services/MempoolService');
 
 // Load keys on start
 loadOrGenerateKeys().catch(err => console.error("Failed to load election keys:", err));
@@ -770,21 +771,20 @@ app.post('/api/vote', async (req, res) => {
     }
 
     try {
-        // Verify: s^e % n == token
-        // Important: auth_token is the UNBLINDED message (BigInt string)
-        const isValid = BlindSignature.verify(auth_token, signature);
+        // --- NEW BLOCKCHAIN NODE LOGIC (Validation & Mempool) ---
+        const result = await MempoolService.addTransaction({
+            vote,
+            auth_token,
+            signature,
+            constituency
+        });
 
-        if (!isValid) {
-            return res.status(401).json({ error: 'Invalid Blind Signature' });
-        }
-
-        // 2. Anonymize Voter ID (Hash the token to prevent double voting)
-        const anonymousId = require('crypto').createHash('sha256').update(auth_token).digest('hex');
-
-        // 3. Cast Vote
-        const result = await castVote(anonymousId, vote, constituency);
         if (result.success) {
-            res.json({ success: true, transactionHash: result.transactionHash });
+            res.json({
+                success: true,
+                transactionHash: result.transactionHash,
+                status: result.status
+            });
         } else {
             res.status(400).json({ error: result.error });
         }
