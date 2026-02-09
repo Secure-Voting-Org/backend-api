@@ -9,8 +9,9 @@ const app = express();
 app.use(cors());
 app.use(express.json({ limit: '50mb' }));
 
-const { findVoterById, updateVoterFace, createVoter, saveRegistrationDetails, incrementRetry, lockAccount, resetLocks, getAllVoters } = require('./models/Voter');
+const { findVoterById, updateVoterFace, createVoter, saveRegistrationDetails, incrementRetry, lockAccount, resetLocks, getAllVoters, findPendingRegistrationByAadhaar, getFlaggedRegistrations } = require('./models/Voter');
 const { createLog, getAllLogs } = require('./models/Log');
+const { checkIpVelocity, checkDeviceVelocity, checkFaceSimilarity, calculateRiskScore, logFraudSignal } = require('./utils/fraudEngine');
 
 const { getCandidatesByConstituency, getCandidatesByMetadata, createCandidate } = require('./models/Candidate');
 const { findObserverByUsername } = require('./models/Observer');
@@ -475,15 +476,58 @@ app.post('/api/registration/submit', async (req, res) => {
 
         const clientIp = req.ip || req.headers['x-forwarded-for'] || req.connection.remoteAddress;
 
-        // --- FRAUD CHECK: REGISTRATION VELOCITY ---
+        // --- FRAUD CHECK: REGISTRATION VELOCITY (IP) ---
         const isHighVelocity = await checkIpVelocity(clientIp, 'REGISTRATION');
         if (isHighVelocity) {
-            await logFraudSignal('HIGH_VELOCITY_REGISTRATION', {
+            await logFraudSignal('HIGH_VELOCITY_REGISTRATION_IP', {
                 count: 'Exceeded Limit',
                 aadhaar: aadhaar
             }, clientIp);
-            // Optionally block, but let's just log for now to avoid blocking legitimate public computers
-            console.warn(`[FRAUD] High velocity registration detected from ${clientIp}`);
+            console.warn(`[FRAUD] High velocity registration detected from IP ${clientIp}`);
+        }
+
+        // --- FRAUD CHECK: DEVICE VELOCITY ---
+        const deviceHash = req.headers['x-device-hash'];
+        if (deviceHash) {
+            const isDeviceHighVelocity = await checkDeviceVelocity(deviceHash);
+            if (isDeviceHighVelocity) {
+                await logFraudSignal('HIGH_VELOCITY_REGISTRATION_DEVICE', {
+                    count: 'Exceeded Limit',
+                    aadhaar: aadhaar,
+                    deviceHash: deviceHash
+                }, clientIp);
+                console.warn(`[FRAUD] High velocity registration detected from Device ${deviceHash}`);
+            }
+        }
+
+        // --- FRAUD CHECK: FACE SIMILARITY ---
+        // Basic check against recent pending applications
+        const faceMatch = await checkFaceSimilarity(faceDescriptor);
+        if (faceMatch && faceMatch.match) {
+            await logFraudSignal('POTENTIAL_DUPLICATE_FACE', {
+                details: 'Face matches existing pending application',
+                matchedApplicationId: faceMatch.applicationId,
+                distance: faceMatch.distance
+            }, clientIp);
+            console.warn(`[FRAUD] Face matches pending application ${faceMatch.applicationId} (dist: ${faceMatch.distance})`);
+            // return res.status(409).json({ error: 'Biometric duplicate detected.' }); // Optional Blocking
+        }
+        // ------------------------------------------
+
+        // --- CALCULATE RISK SCORE ---
+        const riskAssessment = calculateRiskScore({
+            ipVelocity: isHighVelocity,
+            deviceVelocity: deviceHash ? await checkDeviceVelocity(deviceHash) : false,
+            faceSimilarity: faceMatch
+        });
+
+        console.log(`[RISK ASSESSMENT] Score: ${riskAssessment.score}, Flags: ${riskAssessment.flags.join(', ')}`);
+        // ------------------------------------------
+
+        // --- DUPLICATE CHECK: PENDING APPLICATION ---
+        const existingPending = await findPendingRegistrationByAadhaar(aadhaar);
+        if (existingPending) {
+            return res.status(409).json({ error: 'Aadhaar already has a pending application.' });
         }
         // ------------------------------------------
 
@@ -509,16 +553,14 @@ app.post('/api/registration/submit', async (req, res) => {
 
             disability: formData.disabilityOtherSpec || (formData.disabilityCategories?.locomotive ? 'Locomotive' : 'None'),
 
-            faceDescriptor: faceDescriptor // Model will verify array vs JSON string
+            faceDescriptor: faceDescriptor, // Model will verify array vs JSON string
+            ipAddress: clientIp,
+            deviceHash: deviceHash,
+            riskScore: riskAssessment.score,
+            riskFlags: riskAssessment.flags
         };
 
         console.log("DEBUG: Saving to voter_registrations (Pending)...");
-
-        // Save to Pending Table (voter_registrations)
-        // This function handles JSON stringifying of faceDescriptor internally if needed, or we pass object
-        // Based on Voter.js: saveRegistrationDetails takes `details` and stringifies `faceDescriptor`
-        // Add IP Address to stored details
-        registrationData.ipAddress = clientIp;
 
         const applicationId = await saveRegistrationDetails(registrationData);
 
@@ -564,6 +606,21 @@ app.get('/api/voter/:id', async (req, res) => {
         res.json(voter);
     } catch (err) {
         res.status(500).json({ error: 'Lookup failed' });
+    }
+});
+
+// Get Flagged Registrations (Admin)
+app.get('/api/admin/flagged-registrations', async (req, res) => {
+    try {
+        const flaggedRegistrations = await getFlaggedRegistrations();
+        res.json({
+            success: true,
+            count: flaggedRegistrations.length,
+            registrations: flaggedRegistrations
+        });
+    } catch (err) {
+        console.error("Error fetching flagged registrations:", err);
+        res.status(500).json({ error: 'Failed to fetch flagged registrations' });
     }
 });
 
