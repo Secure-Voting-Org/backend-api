@@ -21,6 +21,8 @@ const { createElectoralRollTable } = require('./models/ElectoralRoll');
 const { createRecoveryTable } = require('./models/RecoveryRequest');
 const { createSysAdminTable } = require('./models/SysAdmin');
 
+
+
 const PORT = process.env.PORT || 5000;
 
 // Initialize Databases and Tables

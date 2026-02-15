@@ -17,13 +17,13 @@ app.use(express.json({ limit: '50mb' }));
 
 
 
-const { findVoterById, updateVoterFace, createVoter, saveRegistrationDetails, incrementRetry, lockAccount, resetLocks, getAllVoters, findPendingRegistrationByAadhaar, getFlaggedRegistrations, getPendingRegistrations, getApplicationDetails, approveRegistration, rejectRegistration, getApplicationStatus, createVoterRegistrationAuth, findVoterAuthByMobile, findVoterAuthByEmail, updateVoterPassword } = require('./models/Voter');
+const { findVoterById, updateVoterFace, createVoter, saveRegistrationDetails, incrementRetry, lockAccount, resetLocks, getAllVoters, findPendingRegistrationByAadhaar, getFlaggedRegistrations, getPendingRegistrations, getApprovedRegistrations, getRejectedRegistrations, getApplicationDetails, approveRegistration, rejectRegistration, getApplicationStatus, updateVoterId, createVoterRegistrationAuth, findVoterAuthByMobile, findVoterAuthByEmail, updateVoterPassword } = require('./models/Voter');
 const { createLog, getAllLogs } = require('./models/Log');
 const { checkIpVelocity, checkDeviceVelocity, checkFaceSimilarity, calculateRiskScore, logFraudSignal } = require('./utils/fraudEngine');
 const { generateToken, createSession, invalidateSession } = require('./utils/authService');
 const authMiddleware = require('./middleware/authMiddleware');
 
-const { getCandidatesByConstituency, getCandidatesByMetadata, createCandidate } = require('./models/Candidate');
+const { getCandidatesByConstituency, getCandidatesByMetadata, createCandidate, getAllCandidates } = require('./models/Candidate');
 const { findObserverByUsername } = require('./models/Observer');
 const { castVote, getTurnoutStats, getPublicLedger, getAllVotes } = require('./models/Vote');
 
@@ -31,7 +31,7 @@ const { findAdminByUsername, findAdminByEmail, createAdmin, storeOtp, verifyOtp,
 const { findSysAdminByUsername, createSysAdmin } = require('./models/SysAdmin');
 const { sendOtpEmail } = require('./services/emailService');
 const { getElectionStatus, updateElectionPhase, toggleKillSwitch } = require('./models/Election');
-const { addConstituency, getAllConstituencies } = require('./models/Constituency');
+const { addConstituency, getAllConstituencies, deleteConstituency } = require('./models/Constituency');
 const { findCitizen } = require('./models/ElectoralRoll');
 const { createRecoveryRequest, getRecoveryRequest, updateRecoveryStatus, getAllRecoveryRequests } = require('./models/RecoveryRequest');
 const { loadOrGenerateKeys, getPublicKey, getPrivateKey } = require('./utils/encryption_keys');
@@ -121,6 +121,28 @@ app.get('/api/admin/pending-voters', async (req, res) => {
     } catch (err) {
         console.error("Failed to fetch pending applications:", err);
         res.status(500).json({ error: 'Failed to fetch pending applications' });
+    }
+});
+
+// 3.6 Get All Approved (Admin)
+app.get('/api/admin/approved-voters', async (req, res) => {
+    try {
+        const voters = await getApprovedRegistrations();
+        res.json(voters);
+    } catch (err) {
+        console.error("Error fetching approved voters:", err);
+        res.status(500).json({ error: 'Failed to fetch approved voters' });
+    }
+});
+
+// 3.7 Get All Rejected (Admin)
+app.get('/api/admin/rejected-voters', async (req, res) => {
+    try {
+        const voters = await getRejectedRegistrations();
+        res.json(voters);
+    } catch (err) {
+        console.error("Error fetching rejected voters:", err);
+        res.status(500).json({ error: 'Failed to fetch rejected voters' });
     }
 });
 
@@ -519,12 +541,23 @@ app.get('/api/constituencies', async (req, res) => {
 
 // Add Constituency
 app.post('/api/constituency', async (req, res) => {
-    const { name, district } = req.body;
+    const { name, district, state } = req.body; // Ensure state is extracted
     try {
-        const id = await addConstituency(name, district);
+        const id = await addConstituency(name, district, state);
         res.json({ success: true, id });
     } catch (err) {
         res.status(500).json({ error: 'Failed to add constituency' });
+    }
+});
+
+// Delete Constituency
+app.delete('/api/constituency/:id', async (req, res) => {
+    try {
+        await deleteConstituency(req.params.id);
+        res.json({ success: true, message: 'Constituency deleted' });
+    } catch (err) {
+        console.error("Error deleting constituency:", err);
+        res.status(500).json({ error: 'Failed to delete constituency' });
     }
 });
 
@@ -552,6 +585,23 @@ app.post('/api/candidate', async (req, res) => {
     } catch (err) {
         console.error("Error adding candidate:", err);
         res.status(500).json({ error: 'Failed to add candidate' });
+    }
+});
+
+// Get All Candidates (Master List or Filtered)
+app.get('/api/candidates', async (req, res) => {
+    const { constituency } = req.query;
+    try {
+        let candidates;
+        if (constituency) {
+            candidates = await getCandidatesByConstituency(constituency);
+        } else {
+            candidates = await getAllCandidates();
+        }
+        res.json(candidates);
+    } catch (err) {
+        console.error("Error fetching candidates:", err);
+        res.status(500).json({ error: 'Failed to fetch candidates' });
     }
 });
 
@@ -637,6 +687,8 @@ app.post('/api/registration/validate', async (req, res) => {
 });
 
 // 2. Submit Enrollment (Face)
+// 2. Submit Enrollment (Face & Full Details)
+
 // Helper to generate 12-char alphanumeric Reference ID
 const generateReferenceId = () => {
     const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';
@@ -791,7 +843,7 @@ app.get('/api/application/status/:referenceId', async (req, res) => {
 
     } catch (err) {
         console.error('Error fetching application status:', err);
-        res.status(500).json({ error: 'Failed to fetch application status' });
+        res.status(500).json({ error: 'Failed to fetch application status: ' + err.message });
     }
 });
 
@@ -1436,19 +1488,26 @@ app.post('/api/admin/recovery/approve', async (req, res) => {
 // Check Application Status (Public)
 // Check Application Status (Public)
 
-app.get('/api/application/status/:referenceId', async (req, res) => {
-    try {
-        const { referenceId } = req.params;
-        const status = await getApplicationStatus(referenceId);
 
-        if (!status) {
-            return res.status(404).json({ success: false, error: 'Application not found with this Reference ID' });
+
+// 3.8 Assign NFC Tag (Update Voter ID)
+app.post('/api/admin/assign-nfc', async (req, res) => {
+    const { currentVoterId, nfcTagId } = req.body;
+    try {
+        if (!currentVoterId || !nfcTagId) {
+            return res.status(400).json({ error: 'Current Voter ID and new NFC Tag ID are required' });
         }
 
-        res.json({ success: true, ...status });
+        const updatedVoter = await updateVoterId(currentVoterId, nfcTagId);
+
+        if (updatedVoter) {
+            res.json({ success: true, message: 'NFC Tag Assigned (ID Updated) Successfully', voter: updatedVoter });
+        } else {
+            res.status(404).json({ error: 'Voter not found' });
+        }
     } catch (err) {
-        console.error("Status Check Error:", err);
-        res.status(500).json({ error: 'Failed to check status' });
+        console.error("Assign NFC Error:", err);
+        res.status(500).json({ error: 'Failed to assign NFC Tag: ' + err.message });
     }
 });
 

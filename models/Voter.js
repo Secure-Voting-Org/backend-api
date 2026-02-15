@@ -74,6 +74,10 @@ const createRegistrationTable = async () => {
     address TEXT,
     disability_details TEXT,
     face_descriptor_temp JSON, --Store face here temporarily
+    profile_image_data TEXT,
+    dob_proof_data TEXT,
+    address_proof_data TEXT,
+    disability_proof_data TEXT,
         status VARCHAR(20) DEFAULT 'PENDING', --PENDING, APPROVED, REJECTED
         rejection_reason TEXT, --Reason for rejection
         ip_address VARCHAR(45),
@@ -196,6 +200,8 @@ const saveRegistrationDetails = async (details) => {
 VALUES($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, 'PENDING')
         RETURNING application_id
     `;
+
+    console.log("DEBUG: Saving Registration. RefID:", referenceId, "Name:", name);
 
     const { rows } = await pool.query(query, [
         referenceId, // $1
@@ -443,5 +449,101 @@ module.exports = {
     approveRegistration,
     rejectRegistration,
     getApplicationStatus,
+    createVoterRegistrationAuthTable // Explicit export
+};
+
+const getApprovedRegistrations = async () => {
+    // Approved entries are in 'voters' table usually, but we also can check 'voter_registrations' if we keep them updated
+    // Strategy: PendingVerifications.jsx seems to use voter_registrations table structure.
+    // However, when approved, we might only update status in voter_registrations OR move them.
+    // Let's check 'voter_registrations' status = 'APPROVED'
+    const query = "SELECT * FROM voter_registrations WHERE status = 'APPROVED' ORDER BY created_at DESC";
+    const { rows } = await pool.query(query);
+    return rows;
+};
+
+// Update Voter ID (e.g., Assigning NFC UID)
+const updateVoterId = async (currentId, newId) => {
+    const client = await pool.connect();
+    try {
+        await client.query('BEGIN');
+
+        // 1. Check if newId already exists
+        const checkRes = await client.query("SELECT id FROM voters WHERE id = $1", [newId]);
+        if (checkRes.rows.length > 0) {
+            throw new Error("New ID (NFC UID) is already assigned to another voter.");
+        }
+
+        // 2. Find linked registrations
+        const regRes = await client.query("SELECT application_id FROM voter_registrations WHERE voter_id = $1", [currentId]);
+        const linkedAppIds = regRes.rows.map(r => r.application_id);
+
+        // 3. Unlink registrations (set voter_id = NULL temporarily)
+        // This avoids Foreign Key constraint violation during parent update
+        if (linkedAppIds.length > 0) {
+            await client.query("UPDATE voter_registrations SET voter_id = NULL WHERE voter_id = $1", [currentId]);
+        }
+
+        // 4. Update Voter ID in Parent Table
+        const updateRes = await client.query("UPDATE voters SET id = $1 WHERE id = $2 RETURNING *", [newId, currentId]);
+        if (updateRes.rows.length === 0) {
+            throw new Error("Voter not found.");
+        }
+        const updatedVoter = updateRes.rows[0];
+
+        // 5. Relink registrations to New ID
+        if (linkedAppIds.length > 0) {
+            // Need to handle array for IN clause
+            // easiest way is loop or ANY($1)
+            await client.query("UPDATE voter_registrations SET voter_id = $1 WHERE application_id = ANY($2)", [newId, linkedAppIds]);
+        }
+
+        await client.query('COMMIT');
+        return updatedVoter;
+    } catch (e) {
+        await client.query('ROLLBACK');
+        throw e;
+    } finally {
+        client.release();
+    }
+};
+
+const getRejectedRegistrations = async () => {
+    const query = "SELECT * FROM voter_registrations WHERE status = 'REJECTED' ORDER BY created_at DESC";
+    const { rows } = await pool.query(query);
+    return rows;
+};
+
+module.exports = {
+    createVoterTable,
+    createRegistrationTable,
+    createVoterAuthTable: createVoterRegistrationAuthTable, // Alias for backward compatibility if needed, or just replace
+    findVoterById,
+    findVoterByReferenceId,
+    findRegistrationByReferenceId,
+    findPendingRegistrationByAadhaar,
+    findVoterByEmail,
+    createVoter,
+    createVoterRegistrationAuth,
+    findVoterAuthByMobile,
+    findVoterAuthByEmail,
+    updateVoterPassword,
+    saveRegistrationDetails,
+    updateVoterFace,
+    incrementRetry,
+    lockAccount,
+    resetLocks,
+    getAllVoters,
+    getFlaggedRegistrations,
+    checkTokenIssued,
+    markTokenIssued,
+    getPendingRegistrations,
+    getApprovedRegistrations, // NEW
+    getRejectedRegistrations, // NEW
+    getApplicationDetails,
+    approveRegistration,
+    rejectRegistration,
+    getApplicationStatus,
+    updateVoterId, // NEW
     createVoterRegistrationAuthTable // Explicit export
 };

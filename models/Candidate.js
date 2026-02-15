@@ -98,4 +98,17 @@ const createCandidate = async (candidate) => {
     await pool.query(query, [name, party, constituency, symbol, photo_url]);
 };
 
-module.exports = { createCandidateTable, getCandidatesByConstituency, getCandidatesByMetadata, createCandidate, seedCandidates };
+// Get All Candidates (Joined with Constituency)
+const getAllCandidates = async () => {
+    const query = `
+        SELECT c.id, c.name, c.party, c.symbol, c.constituency, 
+               co.district, co.state
+        FROM candidates c
+        LEFT JOIN constituencies co ON c.constituency = co.name
+        ORDER BY co.state, co.district, c.constituency, c.name
+    `;
+    const { rows } = await pool.query(query);
+    return rows;
+};
+
+module.exports = { createCandidateTable, getCandidatesByConstituency, getCandidatesByMetadata, createCandidate, seedCandidates, getAllCandidates };
