@@ -1135,7 +1135,7 @@ app.post('/api/blind-sign', async (req, res) => {
 
 // Vote Route (Anonymous with Real Blind Signature)
 app.post('/api/vote', async (req, res) => {
-    const { vote, auth_token, signature, constituency } = req.body;
+    const { vote, auth_token, signature, constituency, range_proof } = req.body;
 
     // Check Election Status
     const status = await getElectionStatus();
@@ -1167,8 +1167,8 @@ app.post('/api/vote', async (req, res) => {
         // 2. Anonymize Voter ID (Hash the token to prevent double voting)
         const anonymousId = require('crypto').createHash('sha256').update(auth_token).digest('hex');
 
-        // 3. Cast Vote
-        const result = await castVote(anonymousId, vote, constituency);
+        // 3. Cast Vote (Module 4.7: pass range_proof for ZK validation storage)
+        const result = await castVote(anonymousId, vote, constituency, range_proof || null);
         if (result.success) {
             // --- EPIC 3: P2P Broadcast ---
             // Requirement: "Node A broadcasts the new block to Node B"

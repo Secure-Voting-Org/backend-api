@@ -15,10 +15,16 @@ const createVoteTable = async () => {
         timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP
     )`;
     await pool.query(query);
+
+    // Module 4.7: Add range_proof column if not exists (non-breaking migration)
+    await pool.query(`
+        ALTER TABLE votes ADD COLUMN IF NOT EXISTS range_proof TEXT DEFAULT NULL
+    `);
 };
 
 // Cast Vote: Inserts a new vote effectively as a block in the chain
-const castVote = async (voterId, candidateId, constituency) => {
+// Module 4.7: rangeProof param added (optional, nullable)
+const castVote = async (voterId, candidateId, constituency, rangeProof = null) => {
     // 1. Get the latest vote hash (or Genesis hash if none exists)
     const lastVoteQuery = 'SELECT transaction_hash FROM votes ORDER BY id DESC LIMIT 1';
     const { rows } = await pool.query(lastVoteQuery);
@@ -30,9 +36,10 @@ const castVote = async (voterId, candidateId, constituency) => {
     const data = `${prevHash}-${voterId}-${candidateId}-${timestamp}`;
     const transactionHash = crypto.createHash('sha256').update(data).digest('hex');
 
-    // 3. Insert Vote with prev_hash to link the chain
-    const query = 'INSERT INTO votes (voter_id, candidate_id, constituency, transaction_hash, prev_hash, timestamp) VALUES ($1, $2, $3, $4, $5, to_timestamp($6 / 1000.0)) RETURNING *';
-    const result = await pool.query(query, [voterId, candidateId, constituency, transactionHash, prevHash, timestamp]);
+    // 3. Insert Vote with prev_hash to link the chain, plus optional range_proof
+    const rangeProofStr = rangeProof ? JSON.stringify(rangeProof) : null;
+    const query = 'INSERT INTO votes (voter_id, candidate_id, constituency, transaction_hash, prev_hash, timestamp, range_proof) VALUES ($1, $2, $3, $4, $5, to_timestamp($6 / 1000.0), $7) RETURNING *';
+    const result = await pool.query(query, [voterId, candidateId, constituency, transactionHash, prevHash, timestamp, rangeProofStr]);
 
     return { success: true, transactionHash, prevHash, block: result.rows[0] };
 };
@@ -62,8 +69,9 @@ const getPublicLedger = async (limit = 20) => {
 };
 
 // Get All Votes (For Tallying - Admin Only)
+// Module 4.7: Also returns range_proof for tally loop validation
 const getAllVotes = async () => {
-    const query = 'SELECT candidate_id, constituency FROM votes';
+    const query = 'SELECT candidate_id, constituency, range_proof FROM votes';
     const { rows } = await pool.query(query);
     return rows;
 };
