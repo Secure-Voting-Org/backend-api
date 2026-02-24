@@ -2,7 +2,7 @@ const axios = require('axios');
 
 const testApi = async () => {
     const refId = '2AAIGKC18WAU';
-    const url = `http://localhost:5000/api/application/status/${refId}`;
+    const url = `http://localhost:8081/api/application/status/${refId}`;
     console.log(`Testing API: ${url}`);
 
     try {

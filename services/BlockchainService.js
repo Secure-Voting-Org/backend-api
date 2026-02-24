@@ -197,6 +197,17 @@ class BlockchainService {
             }
         }
 
+        // 4. Check for Excess Votes (Requirement 4.6 - Fraud Detection)
+        const { checkExcessVotes } = require('../utils/fraudEngine');
+        const hasExcessVotes = await checkExcessVotes();
+        if (hasExcessVotes) {
+            const errorMsg = `FRAUD DETECTED: Math Mismatch. Server found more decrypted votes than issued tokens!`;
+            console.error(`[BlockchainService] ${errorMsg}`);
+            this.lastIntegrityStatus.isValid = false;
+            this.lastIntegrityStatus.error = errorMsg;
+            return false;
+        }
+
         this.lastIntegrityStatus.isValid = true;
         this.lastIntegrityStatus.error = null;
         return true;

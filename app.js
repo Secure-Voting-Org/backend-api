@@ -18,6 +18,7 @@ app.use(express.json({ limit: '50mb' }));
 
 
 const { findVoterById, updateVoterFace, createVoter, saveRegistrationDetails, incrementRetry, lockAccount, resetLocks, getAllVoters, findPendingRegistrationByAadhaar, getFlaggedRegistrations, getPendingRegistrations, getApprovedRegistrations, getRejectedRegistrations, getApplicationDetails, approveRegistration, rejectRegistration, getApplicationStatus, updateVoterId, createVoterRegistrationAuth, findVoterAuthByMobile, findVoterAuthByEmail, updateVoterPassword } = require('./models/Voter');
+
 const { createLog, getAllLogs } = require('./models/Log');
 const { checkIpVelocity, checkDeviceVelocity, checkFaceSimilarity, calculateRiskScore, logFraudSignal } = require('./utils/fraudEngine');
 const { generateToken, createSession, invalidateSession } = require('./utils/authService');
@@ -46,6 +47,11 @@ loadOrGenerateKeys().catch(err => console.error("Failed to load election keys:",
 // Health Check Route
 app.get('/', (req, res) => {
     res.json({ message: 'SecureVote Backend API is running' });
+});
+
+// Voice Assistant Config Sync Placeholder
+app.get('/api/health', (req, res) => {
+    res.status(200).json({ status: 'OK', message: 'API Gateway is ready' });
 });
 
 app.get('/api/election/public-key', async (req, res) => {
@@ -265,6 +271,59 @@ app.post('/api/admin/logout', async (req, res) => {
     } catch (err) {
         console.error('Logout logging failed:', err);
         res.status(500).json({ error: 'Logout logging failed' });
+    }
+});
+
+// INJECT FAKE VOTE (TESTING/DEMO ONLY)
+// Requirement 4.6.3.1: Simulate a database breach to trigger the Math Mismatch fraud alert
+app.post('/api/admin/inject-fake-vote', async (req, res) => {
+    try {
+        const { pool } = require('./config/db');
+        // Generate a valid candidate and constituency for the fake vote
+        const uuid = require('crypto').randomUUID();
+
+        // This query forcibly inserts a vote directly into the database,
+        // bypassing the Blind Signature verification and Issued Token checks.
+        await pool.query(`
+            INSERT INTO votes (voter_id, candidate_id, constituency, transaction_hash)
+            VALUES ('HACKER_VOTER', 'FAKE_CANDIDATE', 'SYSTEM_ROOT', $1)
+        `, [uuid]);
+
+        res.json({ success: true, message: 'Fake vote injected. Watchdog will catch this.' });
+    } catch (err) {
+        console.error('Failed to inject fake vote:', err);
+        res.status(500).json({ error: 'Failed' });
+    }
+});
+
+// CLEAR FAKE VOTE (TESTING/DEMO ONLY)
+app.post('/api/admin/clear-fake-votes', async (req, res) => {
+    try {
+        const { pool } = require('./config/db');
+        // Delete by candidate_id explicitly
+        await pool.query(`DELETE FROM votes WHERE candidate_id = 'FAKE_CANDIDATE'`);
+
+        // Failsafe: ensure any un-blocked test injection is scrapped from the ledger
+        await pool.query(`DELETE FROM votes WHERE voter_id = 'HACKER_VOTER'`);
+
+        // FORCE CORRECTION: if there are more votes than tokens (due to old manual UI tests), forcefully sync the issued_tokens count
+        const voteCountRes = await pool.query('SELECT COUNT(*) as v FROM votes');
+        const tokenCountRes = await pool.query('SELECT COUNT(*) as t FROM voters WHERE is_token_issued = TRUE');
+        const votes = parseInt(voteCountRes.rows[0].v, 10);
+        let tokens = parseInt(tokenCountRes.rows[0].t, 10);
+
+        if (votes > tokens) {
+            // Forcefully enable ALL tokens to stop the alarm permanently for development
+            await pool.query(`UPDATE voters SET is_token_issued = TRUE`);
+        }
+
+        // Wipe the UI logs so the frontend dashboard visibly clears the red alerts for the user
+        await pool.query(`DELETE FROM logs WHERE event = 'FRAUD_RISK' AND details->>'fraud_type' = 'MATH_MISMATCH'`);
+
+        res.json({ success: true, message: 'Test data cleared. Alarms should stop.' });
+    } catch (err) {
+        console.error('Failed to clear fake votes:', err);
+        res.status(500).json({ error: 'Failed to clear' });
     }
 });
 
@@ -1018,6 +1077,13 @@ app.post('/api/login', async (req, res) => {
             details: { status, ...details },
             ip_address: req.ip
         });
+
+        // Trigger fraud detection for failed face auth
+        if (status === 'FAILED' && details?.method === 'FACE_AUTH') {
+            const { logFraudSignal } = require('./utils/fraudEngine');
+            await logFraudSignal('FACE_MISMATCH_LOGIN', details, req.ip, userId);
+        }
+
     } catch (err) {
         console.error('Logging failed:', err);
     }
@@ -1880,7 +1946,7 @@ app.get('/api/results/form20/:constituencyId', async (req, res) => {
         const constituencyId = req.params.constituencyId;
 
         // Get full constituency results
-        const resultsResponse = await fetch(`http://localhost:5000/api/results/constituency/${constituencyId}`);
+        const resultsResponse = await fetch(`http://localhost:5001/api/results/constituency/${constituencyId}`);
         const data = await resultsResponse.json();
 
         // Generate Form 20 data

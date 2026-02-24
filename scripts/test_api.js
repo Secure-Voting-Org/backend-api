@@ -4,7 +4,7 @@ const testApi = async () => {
     const refId = 'HDDPBJMWKK37';
     try {
         console.log(`Testing API for RefID: ${refId}`);
-        const url = `http://localhost:5000/api/application/status/${refId}`;
+        const url = `http://localhost:8081/api/application/status/${refId}`;
         const res = await axios.get(url);
         console.log('Response:', res.status, res.data);
     } catch (err) {
