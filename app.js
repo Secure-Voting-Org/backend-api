@@ -13,6 +13,10 @@ app.use(cors());
 // Middleware: Parse JSON bodies (increased limit for images)
 app.use(express.json({ limit: '50mb' }));
 
+// Module 5.3 — Metrics collection middleware (tracks all requests)
+const { metricsMiddleware, getMetrics, healthCheck, recordVote: recordVoteMetric } = require('./middleware/metricsCollector');
+app.use(metricsMiddleware);
+
 
 
 
@@ -43,6 +47,26 @@ const BlindSignature = require('./utils/BlindSignature');
 loadOrGenerateKeys().catch(err => console.error("Failed to load election keys:", err));
 
 // --- REST API ROUTES ---
+
+// Module 5.3 — Metrics & Health Endpoints
+app.get('/api/metrics', async (req, res) => {
+    try {
+        const data = await getMetrics();
+        res.json(data);
+    } catch (err) {
+        console.error('Metrics error:', err);
+        res.status(500).json({ error: 'Failed to collect metrics' });
+    }
+});
+
+app.get('/api/metrics/health', async (req, res) => {
+    try {
+        const health = await healthCheck();
+        res.json(health);
+    } catch (err) {
+        res.status(500).json({ overall: 'DOWN', error: err.message });
+    }
+});
 
 // Health Check Route
 app.get('/', (req, res) => {
@@ -1296,6 +1320,7 @@ app.post('/api/vote', electionPhaseMiddleware, async (req, res) => {
             if (result.block) {
                 MempoolService.broadcastBlock(result.block).catch(e => console.error("Broadcast failed", e));
             }
+            recordVoteMetric(); // Module 5.3 — track vote for metrics
             res.json({ success: true, transactionHash: result.transactionHash });
         } else {
             res.status(400).json({ error: result.error });
