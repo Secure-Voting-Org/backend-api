@@ -1536,7 +1536,7 @@ app.post('/api/verify-receipt', async (req, res) => {
 
     try {
         const { pool } = require('./config/db');
-        const query = 'SELECT transaction_hash, constituency, timestamp FROM votes WHERE transaction_hash = $1';
+        const query = 'SELECT id as block_number, transaction_hash, constituency, timestamp FROM votes WHERE transaction_hash = $1';
         const { rows } = await pool.query(query, [transactionHash]);
 
         if (rows.length === 0) {
@@ -1549,6 +1549,7 @@ app.post('/api/verify-receipt', async (req, res) => {
         res.json({
             verified: true,
             vote: {
+                blockNumber: rows[0].block_number,
                 transactionHash: rows[0].transaction_hash,
                 constituency: rows[0].constituency,
                 timestamp: rows[0].timestamp
