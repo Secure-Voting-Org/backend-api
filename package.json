@@ -12,6 +12,8 @@
   "author": "",
   "license": "ISC",
   "dependencies": {
+    "adm-zip": "^0.5.16",
+    "archiver": "^7.0.1",
     "axios": "^1.13.5",
     "cors": "^2.8.6",
     "crypto-js": "^4.2.0",

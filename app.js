@@ -29,7 +29,7 @@ const { generateToken, createSession, invalidateSession } = require('./utils/aut
 const authMiddleware = require('./middleware/authMiddleware');
 
 const { getCandidatesByConstituency, getCandidatesByMetadata, createCandidate, getAllCandidates, updateCandidate, deleteCandidate } = require('./models/Candidate');
-const { findObserverByUsername } = require('./models/Observer');
+const { findObserverByUsername, createObserver } = require('./models/Observer');
 const { castVote, getTurnoutStats, getPublicLedger, getAllVotes } = require('./models/Vote');
 
 const { findAdminByUsername, findAdminByEmail, createAdmin, storeOtp, verifyOtp, updateAdminPassword, getAllAdmins, updateAdmin, deleteAdmin } = require('./models/Admin');
@@ -65,6 +65,53 @@ app.get('/api/metrics/health', async (req, res) => {
         res.json(health);
     } catch (err) {
         res.status(500).json({ overall: 'DOWN', error: err.message });
+    }
+});
+
+app.get('/api/observer/export-ledger', async (req, res) => {
+    try {
+        const { getPublicLedger } = require('./models/Vote');
+        const ledger = await getPublicLedger();
+
+        // Convert ledger to JSON string and then to a UTF-8 Buffer
+        const ledgerJsonString = JSON.stringify(ledger, null, 2);
+        const ledgerBuffer = Buffer.from(ledgerJsonString, 'utf8');
+
+        // Create an HMAC signature of the exact ledger buffer
+        const crypto = require('crypto');
+        const hmac = crypto.createHmac('sha256', process.env.AUDITOR_EXPORT_KEY || 'eci_secure_export_key_2026');
+        hmac.update(ledgerBuffer);
+        const signature = hmac.digest('hex');
+
+        // Set up the ZIP file response
+        const archiver = require('archiver');
+        res.attachment('secure_voting_ledger_export.zip');
+
+        const archive = archiver('zip', {
+            zlib: { level: 9 } // maximum compression
+        });
+
+        // Listen for all archive data to be written
+        archive.on('error', function (err) {
+            res.status(500).send({ error: err.message });
+        });
+
+        // Pipe archive data to the response
+        archive.pipe(res);
+
+        // Append the ledger and signature files to the zip
+        archive.append(ledgerBuffer, { name: 'ledger.json' });
+        archive.append(signature, { name: 'signature.sha256' });
+        archive.append('This archive contains the immutable public ledger and its cryptographic signature.\nVerify the signature using SHA-256 HMAC against the JSON contents.', { name: 'README.txt' });
+
+        // Finalize the archive (this tells archiver we are done appending)
+        await archive.finalize();
+
+    } catch (err) {
+        console.error('Export error:', err);
+        if (!res.headersSent) {
+            res.status(500).json({ error: 'Failed to generate secure export' });
+        }
     }
 });
 

@@ -8,9 +8,10 @@ const createObserverTable = async () => {
         username VARCHAR(50) NOT NULL UNIQUE,
         password VARCHAR(255) NOT NULL, -- Storing plain text for demo, should be hashed in prod
         full_name VARCHAR(100),
+        email VARCHAR(100),
         role VARCHAR(20) DEFAULT 'general',
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-    )`;
+    ) `;
     await pool.query(query);
 };
 
