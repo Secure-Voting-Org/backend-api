@@ -70,8 +70,9 @@ const getPublicLedger = async (limit = 20) => {
 
 // Get All Votes (For Tallying - Admin Only)
 // Module 4.7: Also returns range_proof for tally loop validation
+// Module 4.8: Returns transaction_hash for tie breaking based on block hash
 const getAllVotes = async () => {
-    const query = 'SELECT candidate_id, constituency, range_proof FROM votes';
+    const query = 'SELECT candidate_id, constituency, range_proof, transaction_hash FROM votes';
     const { rows } = await pool.query(query);
     return rows;
 };

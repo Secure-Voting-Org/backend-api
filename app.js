@@ -296,15 +296,59 @@ app.post('/api/admin/inject-fake-vote', async (req, res) => {
     }
 });
 
+// INJECT FAKE TIE VOTES (TESTING/DEMO ONLY)
+// Requirement 4.8: Automatic Tie Breaking
+app.post('/api/admin/inject-tie-votes', async (req, res) => {
+    try {
+        const { pool } = require('./config/db');
+        const { getPublicKey } = require('./utils/encryption_keys');
+        const paillier = require('paillier-bigint');
+
+        // Fetch election public key to encrypt the mock vote candidate IDs
+        const keyData = await getPublicKey();
+        const pubKey = new paillier.PublicKey(BigInt(keyData.n), BigInt(keyData.g));
+
+        // Let's use two real candidates from the system for the tie, or mock ones that our tally will see.
+        // For the sake of demonstration on the UI, candidate_id needs to be a number/string that we can encrypt.
+        // Assuming Candidate IDs like '1' and '2'.
+        const encCand1 = pubKey.encrypt(BigInt(1)).toString();
+        const encCand2 = pubKey.encrypt(BigInt(2)).toString();
+
+        const constituency = 'TIE_TEST_CONSTITUENCY';
+
+        // Insert exactly 2 votes for Candidate 1 and 2 votes for Candidate 2
+        for (let i = 0; i < 2; i++) {
+            await pool.query(`
+                INSERT INTO votes (voter_id, candidate_id, constituency, transaction_hash)
+                VALUES ($1, $2, $3, $4)
+            `, [`TIE_VOTER_1_${i}`, encCand1, constituency, require('crypto').randomUUID()]);
+
+            await pool.query(`
+                INSERT INTO votes (voter_id, candidate_id, constituency, transaction_hash)
+                VALUES ($1, $2, $3, $4)
+            `, [`TIE_VOTER_2_${i}`, encCand2, constituency, require('crypto').randomUUID()]);
+        }
+
+        res.json({ success: true, message: 'Fake tie votes injected. Look at the Tally page.' });
+    } catch (err) {
+        console.error('Failed to inject fake tie votes:', err);
+        res.status(500).json({ error: 'Failed' });
+    }
+});
+
 // CLEAR FAKE VOTE (TESTING/DEMO ONLY)
 app.post('/api/admin/clear-fake-votes', async (req, res) => {
     try {
         const { pool } = require('./config/db');
-        // Delete by candidate_id explicitly
-        await pool.query(`DELETE FROM votes WHERE candidate_id = 'FAKE_CANDIDATE'`);
-
-        // Failsafe: ensure any un-blocked test injection is scrapped from the ledger
-        await pool.query(`DELETE FROM votes WHERE voter_id = 'HACKER_VOTER'`);
+        // Delete all known test/fake voting data by voter_id or constituency pattern
+        await pool.query(`
+            DELETE FROM votes
+            WHERE voter_id IN ('HACKER_VOTER', 'INVALID_TEST')
+               OR voter_id LIKE 'TIE_VOTER_%'
+               OR voter_id LIKE 'FAKE_%'
+               OR constituency = 'TIE_TEST_CONSTITUENCY'
+               OR candidate_id = 'FAKE_CANDIDATE'
+        `);
 
         // FORCE CORRECTION: if there are more votes than tokens (due to old manual UI tests), forcefully sync the issued_tokens count
         const voteCountRes = await pool.query('SELECT COUNT(*) as v FROM votes');
@@ -318,7 +362,7 @@ app.post('/api/admin/clear-fake-votes', async (req, res) => {
         }
 
         // Wipe the UI logs so the frontend dashboard visibly clears the red alerts for the user
-        await pool.query(`DELETE FROM logs WHERE event = 'FRAUD_RISK' AND details->>'fraud_type' = 'MATH_MISMATCH'`);
+        await pool.query(`DELETE FROM logs WHERE event = 'FRAUD_RISK' AND details ->> 'fraud_type' = 'MATH_MISMATCH'`);
 
         res.json({ success: true, message: 'Test data cleared. Alarms should stop.' });
     } catch (err) {
@@ -431,7 +475,7 @@ app.post('/api/voter/signup', async (req, res) => {
         await createVoterRegistrationAuth(name, mobile, email, password);
 
         // Log success (optional)
-        console.log(`New voter signup: ${name} (${mobile})`);
+        console.log(`New voter signup: ${name}(${mobile})`);
 
         res.status(201).json({ success: true, message: 'Signup successful. You can now login.' });
     } catch (err) {
@@ -527,13 +571,13 @@ app.get('/api/integrity-check', async (req, res) => {
             if (current.prev_hash !== prevHash) {
                 isIntact = false;
                 failedBlockId = current.id;
-                console.error(`[INTEGRITY FAIL] Block ${current.id} prev_hash mismatch. Expected ${prevHash}, got ${current.prev_hash}`);
+                console.error(`[INTEGRITY FAIL] Block ${current.id} prev_hash mismatch.Expected ${prevHash}, got ${current.prev_hash}`);
                 break;
             }
 
             // 2. Verify Content Hash
             // Note: We need to reconstruct the EXACT string used in creation.
-            // castVote uses: `${prevHash}-${voterId}-${candidateId}-${timestamp}`
+            // castVote uses: `${ prevHash } - ${ voterId } - ${ candidateId } - ${ timestamp }`
             // Timestamp in DB is Date object, we need to convert to millisecond epoch if that's what was used.
             // castVote stores Date.now() in 'data' string, but passes 'to_timestamp(...)' to DB.
             // Retreiving from DB gives a Date object. 
@@ -804,7 +848,7 @@ app.post('/api/registration/submit', async (req, res) => {
                 matchedApplicationId: faceMatch.applicationId,
                 distance: faceMatch.distance
             }, clientIp);
-            console.warn(`[FRAUD] Face matches pending application ${faceMatch.applicationId} (dist: ${faceMatch.distance})`);
+            console.warn(`[FRAUD] Face matches pending application ${faceMatch.applicationId}(dist: ${faceMatch.distance})`);
             // return res.status(409).json({ error: 'Biometric duplicate detected.' }); // Optional Blocking
         }
         // ------------------------------------------
@@ -816,7 +860,7 @@ app.post('/api/registration/submit', async (req, res) => {
             faceSimilarity: faceMatch
         });
 
-        console.log(`[RISK ASSESSMENT] Score: ${riskAssessment.score}, Flags: ${riskAssessment.flags.join(', ')}`);
+        console.log(`[RISK ASSESSMENT]Score: ${riskAssessment.score}, Flags: ${riskAssessment.flags.join(', ')}`);
         // ------------------------------------------
 
         // --- DUPLICATE CHECK: PENDING APPLICATION ---
@@ -848,7 +892,7 @@ app.post('/api/registration/submit', async (req, res) => {
             district: formData.district,
             constituency: formData.assemblyConstituency,
 
-            dob: `${formData.dobDay}/${formData.dobMonth}/${formData.dobYear}`,
+            dob: `${formData.dobDay} / ${formData.dobMonth} / ${formData.dobYear}`,
             gender: formData.gender,
 
             mobile: formData.mobileSelf ? formData.mobileNumber : formData.mobileRelativeNumber,
@@ -1286,16 +1330,16 @@ app.post('/api/observer/forgot-password', async (req, res) => {
         const otp = Math.floor(100000 + Math.random() * 900000).toString();
         otpStore[email] = { otp, expires: Date.now() + 300000 }; // 5 mins expiry
 
-        console.log(`[OTP] Password Reset Code for ${email}: ${otp}`);
+        console.log(`[OTP] Password Reset Code for ${email}: ${otp} `);
 
         // Send OTP via centralized email service
         const emailResult = await sendOtpEmail(email, otp);
 
         if (emailResult.success) {
-            console.log(`✓ OTP email sent successfully to ${email}`);
+            console.log(`✓ OTP email sent successfully to ${email} `);
             res.json({ success: true, message: 'OTP sent to your email.' });
         } else {
-            console.log(`⚠ Email sending failed, but OTP logged to console: ${otp}`);
+            console.log(`⚠ Email sending failed, but OTP logged to console: ${otp} `);
             res.json({ success: true, message: 'OTP generated (Check Console - Email Failed)', demoOtp: otp });
         }
 
@@ -1435,7 +1479,7 @@ app.post('/api/fraud-check', (req, res) => {
     });
 
     pythonProcess.stderr.on('data', (data) => {
-        console.error(`Python Error: ${data}`);
+        console.error(`Python Error: ${data} `);
     });
 
     pythonProcess.on('close', (code) => {
@@ -1461,7 +1505,7 @@ app.post('/api/recovery/initiate', async (req, res) => {
 
         // Check Lockout
         if (voter.locked_until && new Date(voter.locked_until) > new Date()) {
-            return res.status(403).json({ error: `Account locked. Try again after ${voter.locked_until}` });
+            return res.status(403).json({ error: `Account locked.Try again after ${voter.locked_until} ` });
         }
 
         const requestId = await createRecoveryRequest(voterId);
@@ -1714,7 +1758,7 @@ app.post('/api/voter/forgot-password', async (req, res) => {
         const otp = Math.floor(100000 + Math.random() * 900000).toString();
         otpStore[email] = { otp, expires: Date.now() + 300000 };
 
-        console.log(`[VOTER OTP] Reset Code for ${email}: ${otp}`);
+        console.log(`[VOTER OTP] Reset Code for ${email}: ${otp} `);
 
         // Email Sending Logic (Reused)
         const nodemailer = require('nodemailer');
@@ -1731,9 +1775,9 @@ app.post('/api/voter/forgot-password', async (req, res) => {
                 from: process.env.EMAIL_USER,
                 to: email,
                 subject: 'Voter Password Reset OTP - SecureVote',
-                text: `Your OTP for password reset is: ${otp}\n\nThis code expires in 5 minutes.`
+                text: `Your OTP for password reset is: ${otp} \n\nThis code expires in 5 minutes.`
             });
-            console.log(`[EMAIL] OTP sent to ${email}`);
+            console.log(`[EMAIL] OTP sent to ${email} `);
             res.json({ success: true, message: 'OTP sent to your email.' });
         } else {
             // Demo Fallback
@@ -1792,8 +1836,8 @@ app.get('/api/results/constituency/:id', async (req, res) => {
 
         // Get candidate results
         const { rows: results } = await pool.query(`
-            SELECT 
-                c.id,
+            SELECT
+            c.id,
                 c.name,
                 c.party,
                 c.symbol,
@@ -1803,7 +1847,7 @@ app.get('/api/results/constituency/:id', async (req, res) => {
             WHERE c.constituency_id = $1
             GROUP BY c.id, c.name, c.party, c.symbol
             ORDER BY vote_count DESC
-        `, [constituencyId]);
+                `, [constituencyId]);
 
         // Calculate total votes
         const totalVotes = results.reduce((sum, r) => sum + parseInt(r.vote_count), 0);
@@ -1816,12 +1860,12 @@ app.get('/api/results/constituency/:id', async (req, res) => {
 
         // Get voter turnout
         const { rows: [turnout] } = await pool.query(`
-            SELECT 
-                COUNT(*) as total_voters,
+            SELECT
+            COUNT(*) as total_voters,
                 COUNT(CASE WHEN has_voted = true THEN 1 END) as voted_count
             FROM voters
             WHERE constituency = $1
-        `, [constituency.name]);
+                `, [constituency.name]);
 
         res.json({
             constituency,
@@ -1853,22 +1897,22 @@ app.get('/api/results/summary', async (req, res) => {
 
         // Get total registered voters
         const { rows: [voterStats] } = await pool.query(`
-            SELECT 
-                COUNT(*) as total_voters,
+            SELECT
+            COUNT(*) as total_voters,
                 COUNT(CASE WHEN has_voted = true THEN 1 END) as voted_count
             FROM voters
-        `);
+                `);
 
         // Get party-wise results
         const { rows: partyResults } = await pool.query(`
-            SELECT 
-                c.party,
+            SELECT
+            c.party,
                 COUNT(v.id) as vote_count
             FROM candidates c
             LEFT JOIN votes v ON v.candidate_id = c.id
             GROUP BY c.party
             ORDER BY vote_count DESC
-        `);
+                `);
 
         const totalVotes = parseInt(voteStats.total_votes);
         const partyResultsWithPercentage = partyResults.map(p => ({
@@ -1898,16 +1942,16 @@ app.get('/api/results/turnout', async (req, res) => {
     try {
         // Overall turnout
         const { rows: [overall] } = await pool.query(`
-            SELECT 
-                COUNT(*) as total_voters,
+            SELECT
+            COUNT(*) as total_voters,
                 COUNT(CASE WHEN has_voted = true THEN 1 END) as voted_count
             FROM voters
-        `);
+                `);
 
         // Constituency-wise turnout
         const { rows: constituencyTurnout } = await pool.query(`
-            SELECT 
-                constituency,
+            SELECT
+            constituency,
                 COUNT(*) as total_voters,
                 COUNT(CASE WHEN has_voted = true THEN 1 END) as voted_count
             FROM voters
