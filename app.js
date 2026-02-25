@@ -24,7 +24,7 @@ const { checkIpVelocity, checkDeviceVelocity, checkFaceSimilarity, calculateRisk
 const { generateToken, createSession, invalidateSession } = require('./utils/authService');
 const authMiddleware = require('./middleware/authMiddleware');
 
-const { getCandidatesByConstituency, getCandidatesByMetadata, createCandidate, getAllCandidates } = require('./models/Candidate');
+const { getCandidatesByConstituency, getCandidatesByMetadata, createCandidate, getAllCandidates, updateCandidate, deleteCandidate } = require('./models/Candidate');
 const { findObserverByUsername } = require('./models/Observer');
 const { castVote, getTurnoutStats, getPublicLedger, getAllVotes } = require('./models/Vote');
 
@@ -737,6 +737,51 @@ app.get('/api/candidates', async (req, res) => {
     } catch (err) {
         console.error("Error fetching candidates:", err);
         res.status(500).json({ error: 'Failed to fetch candidates' });
+    }
+});
+
+// Module 5.2 — Update Candidate (PRE_POLL only)
+app.put('/api/candidate/:id', async (req, res) => {
+    try {
+        // Phase guard: ballot is locked during LIVE/POST_POLL
+        const status = await getElectionStatus();
+        if (status && status.phase !== 'PRE_POLL') {
+            return res.status(403).json({ error: 'Ballot is locked. Candidate changes are only allowed during PRE_POLL phase.' });
+        }
+
+        const { name, party, symbol } = req.body;
+        if (!name || !symbol) {
+            return res.status(400).json({ error: 'Name and Symbol are required.' });
+        }
+
+        const updated = await updateCandidate(req.params.id, { name, party, symbol });
+        if (!updated) {
+            return res.status(404).json({ error: 'Candidate not found.' });
+        }
+        res.json({ success: true, candidate: updated });
+    } catch (err) {
+        console.error('Error updating candidate:', err);
+        res.status(500).json({ error: 'Failed to update candidate' });
+    }
+});
+
+// Module 5.2 — Delete Candidate (PRE_POLL only, 5.2.3.1 ballot auto-removes)
+app.delete('/api/candidate/:id', async (req, res) => {
+    try {
+        // Phase guard: ballot is locked during LIVE/POST_POLL
+        const status = await getElectionStatus();
+        if (status && status.phase !== 'PRE_POLL') {
+            return res.status(403).json({ error: 'Ballot is locked. Candidate changes are only allowed during PRE_POLL phase.' });
+        }
+
+        const deleted = await deleteCandidate(req.params.id);
+        if (!deleted) {
+            return res.status(404).json({ error: 'Candidate not found.' });
+        }
+        res.json({ success: true, message: `Candidate '${deleted.name}' removed from ballot.` });
+    } catch (err) {
+        console.error('Error deleting candidate:', err);
+        res.status(500).json({ error: 'Failed to delete candidate' });
     }
 });
 
