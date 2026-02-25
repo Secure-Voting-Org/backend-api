@@ -1,7 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import request from 'supertest';
 
-const BASE_URL = 'http://localhost:8081';
+const BASE_URL = 'http://localhost:5000';
 
 describe('Auth API Integration Tests', () => {
     it('POST /api/auth/login should fail with invalid credentials', async () => {

@@ -2,7 +2,7 @@ import { describe, it, expect, beforeAll } from 'vitest';
 import request from 'supertest';
 import app from '../app.js'; // Assuming app.js exports the express instance
 
-const BASE_URL = 'http://localhost:5001';
+const BASE_URL = 'http://localhost:5000';
 
 describe('Backend API Testing - Fraud Detection (Supertest)', () => {
     let adminToken = '';

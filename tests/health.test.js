@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import request from 'supertest';
-const BASE_URL = 'http://localhost:8081'; // Assuming server is running, or we can import app if exported
+const BASE_URL = 'http://localhost:5000'; // Assuming server is running, or we can import app if exported
 
 describe('Health Check API', () => {
     it('GET / should return 200 and welcome message', async () => {

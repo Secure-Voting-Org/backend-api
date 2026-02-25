@@ -2,7 +2,7 @@ import { describe, it, expect } from 'vitest';
 import request from 'supertest';
 
 // Using Port 5001 as per the recent configuration update
-const BASE_URL = 'http://localhost:5001';
+const BASE_URL = 'http://localhost:5000';
 
 describe('Voice Control (Audio Assist) - Backend API Tests (Supertest)', () => {
 

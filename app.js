@@ -352,13 +352,14 @@ app.post('/api/admin/inject-fake-vote', async (req, res) => {
         const { pool } = require('./config/db');
         // Generate a valid candidate and constituency for the fake vote
         const uuid = require('crypto').randomUUID();
+        const fakeVoterId = 'HACKER_VOTER_' + uuid.substring(0, 8);
 
         // This query forcibly inserts a vote directly into the database,
         // bypassing the Blind Signature verification and Issued Token checks.
         await pool.query(`
             INSERT INTO votes (voter_id, candidate_id, constituency, transaction_hash)
-            VALUES ('HACKER_VOTER', 'FAKE_CANDIDATE', 'SYSTEM_ROOT', $1)
-        `, [uuid]);
+            VALUES ($1, 'FAKE_CANDIDATE', 'SYSTEM_ROOT', $2)
+        `, [fakeVoterId, uuid]);
 
         res.json({ success: true, message: 'Fake vote injected. Watchdog will catch this.' });
     } catch (err) {
@@ -417,6 +418,7 @@ app.post('/api/admin/clear-fake-votes', async (req, res) => {
             WHERE voter_id IN ('HACKER_VOTER', 'INVALID_TEST')
                OR voter_id LIKE 'TIE_VOTER_%'
                OR voter_id LIKE 'FAKE_%'
+               OR voter_id LIKE 'HACKER_VOTER_%'
                OR constituency = 'TIE_TEST_CONSTITUENCY'
                OR candidate_id = 'FAKE_CANDIDATE'
         `);
@@ -2238,7 +2240,7 @@ app.get('/api/results/form20/:constituencyId', async (req, res) => {
         const constituencyId = req.params.constituencyId;
 
         // Get full constituency results
-        const resultsResponse = await fetch(`http://localhost:5001/api/results/constituency/${constituencyId}`);
+        const resultsResponse = await fetch(`http://localhost:5000/api/results/constituency/${constituencyId}`);
         const data = await resultsResponse.json();
 
         // Generate Form 20 data
