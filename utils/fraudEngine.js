@@ -145,6 +145,41 @@ const calculateRiskScore = (checks) => {
     return { score, flags };
 };
 
+/**
+ * Check if the total number of decrypted votes exceeds the total number of issued tokens (voters).
+ * Requirement 4.6.1.1 and 4.6.2.1
+ * @returns {Promise<boolean>} - True if excess votes detected (fraud), False otherwise.
+ */
+const checkExcessVotes = async () => {
+    try {
+        // 1. Total Decrypted Votes (Total ballots cast)
+        const voteQuery = 'SELECT COUNT(*) as total_votes FROM votes';
+        const voteRes = await pool.query(voteQuery);
+        const totalVotes = parseInt(voteRes.rows[0].total_votes, 10);
+
+        // 2. Total Issued Tokens (Eligible voters who received a blind signature)
+        const tokenQuery = 'SELECT COUNT(*) as issued_tokens FROM voters WHERE is_token_issued = TRUE';
+        const tokenRes = await pool.query(tokenQuery);
+        const issuedTokens = parseInt(tokenRes.rows[0].issued_tokens, 10);
+
+        // 3. Compare (Requirement 4.6.2.1: if votes > voters trigger alarm)
+        if (totalVotes > issuedTokens) {
+            await logFraudSignal('MATH_MISMATCH', {
+                reason: 'Total votes cast exceeds total authorized tokens issued.',
+                total_votes_found: totalVotes,
+                total_tokens_issued: issuedTokens
+            }, 'SYSTEM_WATCHDOG');
+
+            return true; // Fraud detected
+        }
+
+        return false; // Valid
+    } catch (err) {
+        console.error("Error checking excess votes:", err);
+        return false;
+    }
+};
+
 
 const logFraudSignal = async (type, details, ipAddress, userId = null) => {
     console.warn(`[FRAUD_SIGNAL] ${type} from ${ipAddress}`, details);
@@ -165,6 +200,7 @@ module.exports = {
     checkDeviceVelocity,
     checkFaceSimilarity,
     calculateRiskScore,
+    checkExcessVotes,
     logFraudSignal,
     FRAUD_CONFIG
 };

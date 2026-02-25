@@ -111,4 +111,18 @@ const getAllCandidates = async () => {
     return rows;
 };
 
-module.exports = { createCandidateTable, getCandidatesByConstituency, getCandidatesByMetadata, createCandidate, seedCandidates, getAllCandidates };
+// Update Candidate (5.2.1.1 - Update, PRE_POLL only enforced at API layer)
+const updateCandidate = async (id, { name, party, symbol }) => {
+    const query = 'UPDATE candidates SET name = $1, party = $2, symbol = $3 WHERE id = $4 RETURNING *';
+    const { rows } = await pool.query(query, [name, party, symbol, id]);
+    return rows[0];
+};
+
+// Delete Candidate (5.2.1.1 - Delete, 5.2.3.1 - ballot auto-removes, PRE_POLL only)
+const deleteCandidate = async (id) => {
+    const query = 'DELETE FROM candidates WHERE id = $1 RETURNING *';
+    const { rows } = await pool.query(query, [id]);
+    return rows[0];
+};
+
+module.exports = { createCandidateTable, getCandidatesByConstituency, getCandidatesByMetadata, createCandidate, seedCandidates, getAllCandidates, updateCandidate, deleteCandidate };
