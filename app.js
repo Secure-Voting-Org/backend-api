@@ -609,6 +609,38 @@ app.post('/api/election/update', async (req, res) => {
     }
 });
 
+// Requirement 5.1.1.1 — GET current election phase state (public, no auth required)
+app.get('/api/election/status', async (req, res) => {
+    try {
+        const status = await getElectionStatus();
+        res.json(status);
+    } catch (err) {
+        res.status(500).json({ error: 'Failed to fetch election status' });
+    }
+});
+
+// Requirement 5.1.2.1 & 5.1.3.1 — Election Phase Middleware
+// Blocks /api/vote with specific messages based on the current phase
+// ADDITIVE: Does NOT modify existing /api/vote logic, only sits in front of it
+const electionPhaseMiddleware = async (req, res, next) => {
+    try {
+        const status = await getElectionStatus();
+        if (!status) return next(); // Fail open if config missing
+
+        if (status.phase === 'PRE_POLL') {
+            // 5.1.3.1: Voting before start returns 'Election Not Started'
+            return res.status(403).json({ error: 'Election Not Started' });
+        }
+        if (status.phase === 'POST_POLL') {
+            return res.status(403).json({ error: 'Election Has Ended' });
+        }
+        // PRE_POLL and POST_POLL blocked above; existing vote logic handles LIVE + kill switch
+        next();
+    } catch (err) {
+        next(); // Fail-open: do not block votes on middleware error
+    }
+};
+
 // --- TALLYING AUTHORITY ROUTES (ADMIN ONLY) ---
 app.get('/api/admin/votes', async (req, res) => {
     // In production, Strict Auth Middleware here!
@@ -1178,7 +1210,7 @@ app.post('/api/blind-sign', async (req, res) => {
 });
 
 // Vote Route (Anonymous with Real Blind Signature)
-app.post('/api/vote', async (req, res) => {
+app.post('/api/vote', electionPhaseMiddleware, async (req, res) => {
     const { vote, auth_token, signature, constituency, range_proof } = req.body;
 
     // Check Election Status
