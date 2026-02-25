@@ -13,10 +13,6 @@ app.use(cors());
 // Middleware: Parse JSON bodies (increased limit for images)
 app.use(express.json({ limit: '50mb' }));
 
-// Module 5.3 — Metrics collection middleware (tracks all requests)
-const { metricsMiddleware, getMetrics, healthCheck, recordVote: recordVoteMetric } = require('./middleware/metricsCollector');
-app.use(metricsMiddleware);
-
 
 
 
@@ -42,31 +38,12 @@ const { createRecoveryRequest, getRecoveryRequest, updateRecoveryStatus, getAllR
 const { loadOrGenerateKeys, getPublicKey, getPrivateKey } = require('./utils/encryption_keys');
 const MempoolService = require('./utils/MempoolService');
 const BlindSignature = require('./utils/BlindSignature');
+const { pool } = require('./config/db');
 
 // Load keys on start
 loadOrGenerateKeys().catch(err => console.error("Failed to load election keys:", err));
 
 // --- REST API ROUTES ---
-
-// Module 5.3 — Metrics & Health Endpoints
-app.get('/api/metrics', async (req, res) => {
-    try {
-        const data = await getMetrics();
-        res.json(data);
-    } catch (err) {
-        console.error('Metrics error:', err);
-        res.status(500).json({ error: 'Failed to collect metrics' });
-    }
-});
-
-app.get('/api/metrics/health', async (req, res) => {
-    try {
-        const health = await healthCheck();
-        res.json(health);
-    } catch (err) {
-        res.status(500).json({ overall: 'DOWN', error: err.message });
-    }
-});
 
 app.get('/api/observer/export-ledger', async (req, res) => {
     try {
