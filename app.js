@@ -8,8 +8,36 @@ const path = require('path');
 // Initialize Express App
 const app = express();
 
-// Middleware: Enable CORS for frontend access
-app.use(cors());
+// Middleware: CORS - allows local dev and all deployed frontends
+const corsOptions = {
+    origin: function (origin, callback) {
+        const allowedOrigins = [
+            // Local development
+            'http://localhost:5173',
+            'http://localhost:5174',
+            'http://localhost:5175',
+            'http://localhost:5176',
+            'http://localhost:5177',
+            'https://localhost:5173',
+            'https://localhost:5174',
+            'https://localhost:5175',
+            'https://localhost:5176',
+            'https://localhost:5177',
+            // Render backend itself
+            'https://secure-transparent-electronic-voting.onrender.com',
+        ];
+        // Allow any Vercel deployment (*.vercel.app)
+        if (!origin || allowedOrigins.includes(origin) || /\.vercel\.app$/.test(origin)) {
+            callback(null, true);
+        } else {
+            callback(new Error('Not allowed by CORS'));
+        }
+    },
+    credentials: true,
+    methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+    allowedHeaders: ['Content-Type', 'Authorization']
+};
+app.use(cors(corsOptions));
 // Middleware: Parse JSON bodies (increased limit for images)
 app.use(express.json({ limit: '50mb' }));
 
