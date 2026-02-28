@@ -2,13 +2,21 @@ const { Pool } = require('pg');
 require('dotenv').config();
 
 // PostgreSQL Connection Pool
-const pool = new Pool({
-    user: process.env.DB_USER,
-    host: process.env.DB_HOST,
-    database: process.env.DB_NAME,
-    password: process.env.DB_PASSWORD,
-    port: process.env.DB_PORT || 5432,
-});
+// Uses DATABASE_URL (Neon/cloud) when set, falls back to individual vars for local dev
+const poolConfig = process.env.DATABASE_URL
+    ? {
+        connectionString: process.env.DATABASE_URL,
+        ssl: { rejectUnauthorized: false }, // required for Neon SSL
+    }
+    : {
+        user: process.env.DB_USER,
+        host: process.env.DB_HOST,
+        database: process.env.DB_NAME,
+        password: process.env.DB_PASSWORD,
+        port: process.env.DB_PORT || 5432,
+    };
+
+const pool = new Pool(poolConfig);
 
 // Check PostgreSQL Connection
 const checkDbConnection = async () => {
