@@ -9,11 +9,11 @@ const IDLE_TIMEOUT_MINUTES = 15; // Inactivity timeout
 /**
  * Generate a JWT token for a user session.
  */
-const generateToken = (user, deviceHash) => {
+const generateToken = (user, deviceHash, role = 'VOTER') => {
     return jwt.sign(
         {
-            id: user.id || user.mobile, // Use mobile if ID not available (e.g. at auth stage)
-            role: user.role || 'VOTER',
+            id: user.id || user.mobile || user.username, // Handle different ID fields
+            role: user.role || role,
             deviceHash: deviceHash
         },
         JWT_SECRET,
@@ -21,18 +21,38 @@ const generateToken = (user, deviceHash) => {
     );
 };
 
+// Helper function to determine session table and foreign key based on role
+const getSessionTableConfig = (role) => {
+    switch (role) {
+        case 'ADMIN':
+        case 'ELECTION_ADMIN':
+        case 'PRE_POLL':
+        case 'POST_POLL':
+            return { table: 'admin_sessions', idCol: 'admin_id' };
+        case 'SYS_ADMIN':
+            return { table: 'sysadmin_sessions', idCol: 'sysadmin_id' };
+        case 'OBSERVER':
+            return { table: 'observer_sessions', idCol: 'observer_id' };
+        case 'VOTER':
+        default:
+            return { table: 'voter_sessions', idCol: 'voter_id' };
+    }
+};
+
 /**
  * Create a new session in the database.
  * Invalidates previous active sessions for the same user (Single Concurrent Login).
  */
-const createSession = async (userId, token, deviceHash, ipAddress, userAgent) => {
+const createSession = async (userId, token, deviceHash, ipAddress, userAgent, role = 'VOTER') => {
     const client = await pool.connect();
     try {
         await client.query('BEGIN');
 
+        const { table, idCol } = getSessionTableConfig(role);
+
         // 1. Invalidate existing active sessions for this user (Single Session Rule)
         await client.query(
-            "UPDATE voter_sessions SET is_active = FALSE WHERE voter_id = $1 AND is_active = TRUE",
+            `UPDATE ${table} SET is_active = FALSE WHERE ${idCol} = $1 AND is_active = TRUE`,
             [userId]
         );
 
@@ -43,13 +63,14 @@ const createSession = async (userId, token, deviceHash, ipAddress, userAgent) =>
         const tokenHash = token.split('.').pop(); // Store signature part as identifier
 
         const query = `
-            INSERT INTO voter_sessions 
-            (voter_id, token_hash, device_hash, ip_address, user_agent, expires_at)
-            VALUES ($1, $2, $3, $4, $5, NOW() + INTERVAL '2 hours')
+            INSERT INTO ${table} 
+            (${idCol}, token_hash, device_hash, ip_address, user_agent, expires_at, is_active)
+            VALUES ($1, $2, $3, $4, $5, NOW() + INTERVAL '2 hours', TRUE)
             RETURNING session_id
         `;
 
-        await client.query(query, [userId, tokenHash, deviceHash, ipAddress, userAgent]);
+        const { rows } = await client.query(query, [userId, tokenHash, deviceHash, ipAddress, userAgent]);
+        const sessionId = rows[0].session_id;
 
         await client.query('COMMIT');
     } catch (err) {
@@ -64,7 +85,7 @@ const createSession = async (userId, token, deviceHash, ipAddress, userAgent) =>
  * Verify session validity (Token + DB Check).
  * Checks: Token Signature, Expiry, DB Active Status, Idle Timeout, Device Binding.
  */
-const verifySession = async (token, deviceHash) => {
+const verifySession = async (token, deviceHash, role = 'VOTER') => {
     try {
         // 1. Verify JWT Signature
         const decoded = jwt.verify(token, JWT_SECRET);
@@ -77,8 +98,11 @@ const verifySession = async (token, deviceHash) => {
         const tokenHash = token.split('.').pop();
 
         // 3. DB Session Check (Is Active? Not Idle?)
+        const tokenRole = decoded.role || role;
+        const { table } = getSessionTableConfig(tokenRole);
+
         const query = `
-            SELECT * FROM voter_sessions 
+            SELECT * FROM ${table} 
             WHERE token_hash = $1 AND is_active = TRUE
         `;
         const { rows } = await pool.query(query, [tokenHash]);
@@ -95,12 +119,12 @@ const verifySession = async (token, deviceHash) => {
 
         if (diffMinutes > IDLE_TIMEOUT_MINUTES) {
             // Expire session
-            await pool.query("UPDATE voter_sessions SET is_active = FALSE WHERE session_id = $1", [session.session_id]);
+            await pool.query(`UPDATE ${table} SET is_active = FALSE WHERE session_id = $1`, [session.session_id]);
             return { valid: false, error: 'Session timed out due to inactivity' };
         }
 
         // 5. Update Last Active
-        await pool.query("UPDATE voter_sessions SET last_active_at = NOW() WHERE session_id = $1", [session.session_id]);
+        await pool.query(`UPDATE ${table} SET last_active_at = NOW() WHERE session_id = $1`, [session.session_id]);
 
         return { valid: true, user: decoded, sessionId: session.session_id };
 
@@ -109,10 +133,19 @@ const verifySession = async (token, deviceHash) => {
     }
 };
 
-const invalidateSession = async (token) => {
+const invalidateSession = async (token, role = 'VOTER') => {
     if (!token) return;
-    const tokenHash = token.split('.').pop();
-    await pool.query("UPDATE voter_sessions SET is_active = FALSE WHERE token_hash = $1", [tokenHash]);
+    try {
+        const decoded = jwt.decode(token);
+        const tokenRole = decoded?.role || role;
+        const { table } = getSessionTableConfig(tokenRole);
+
+        const tokenHash = token.split('.').pop();
+        await pool.query(`UPDATE ${table} SET is_active = FALSE WHERE token_hash = $1`, [tokenHash]);
+    } catch (e) {
+        // Fallback for invalid token or decode fail during invalidation
+        console.error("Session Invalidation Error:", e);
+    }
 };
 
 module.exports = {

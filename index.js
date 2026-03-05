@@ -16,6 +16,7 @@ const { createVoteTable } = require('./models/Vote');
 // Import new models for extended functionality
 const { createAdminTable } = require('./models/Admin');
 const { createElectionTable } = require('./models/Election');
+const { createElectionHistoryTable } = require('./models/ElectionHistory');
 const { createConstituencyTable } = require('./models/Constituency');
 const { createElectoralRollTable } = require('./models/ElectoralRoll');
 const { createRecoveryTable } = require('./models/RecoveryRequest');
@@ -41,6 +42,7 @@ checkDbConnection().then(async () => {
         // Initialize new tables
         await createAdminTable();
         await createElectionTable();
+        await createElectionHistoryTable();
         await createConstituencyTable();
         await createElectoralRollTable();
         await createRecoveryTable();

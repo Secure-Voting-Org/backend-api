@@ -1,8 +1,10 @@
 const paillier = require('paillier-bigint');
 const fs = require('fs');
 const path = require('path');
+const secrets = require('secrets.js-grempe');
 
 const KEY_FILE = path.join(__dirname, '../config/election_keys.json');
+const SHARES_FILE = path.join(__dirname, '../config/election_key_shares.json');
 
 let publicKey;
 let privateKey;
@@ -38,7 +40,11 @@ const loadOrGenerateKeys = async () => {
                 lambda: (privateKey.lambda || privateKey._lambda).toString(),
                 mu: (privateKey.mu || privateKey._mu).toString(),
                 p: (privateKey.p || privateKey._p).toString(),
-                q: (privateKey.q || privateKey._q).toString()
+                q: (privateKey.q || privateKey._q).toString(),
+                publicKey: {
+                    n: publicKey.n.toString(),
+                    g: publicKey.g.toString()
+                }
             }
         };
 
@@ -49,10 +55,37 @@ const loadOrGenerateKeys = async () => {
         }
 
         fs.writeFileSync(KEY_FILE, JSON.stringify(serializableKeys, null, 2));
-        console.log("Election keys generated and saved.");
+
+        // Generate Shamir Shares (3-of-3)
+        // Convert the private key object into a hex string for splitting
+        const privateKeyString = JSON.stringify(serializableKeys.privateKey);
+        const privateKeyHex = secrets.str2hex(privateKeyString);
+
+        // Create 3 shares with a threshold of 3
+        const shares = secrets.share(privateKeyHex, 3, 3);
+
+        const sharesObject = {
+            threshold: 3,
+            total_shares: 3,
+            shares: {
+                "Official A": shares[0],
+                "Official B": shares[1],
+                "Official C": shares[2]
+            }
+        };
+        fs.writeFileSync(SHARES_FILE, JSON.stringify(sharesObject, null, 2));
+
+        console.log("Election keys and Shamir shares generated and saved.");
     }
 
     return { publicKey, privateKey };
+};
+
+const getShares = () => {
+    if (fs.existsSync(SHARES_FILE)) {
+        return JSON.parse(fs.readFileSync(SHARES_FILE, 'utf8'));
+    }
+    return null;
 };
 
 const getPublicKey = async () => {
@@ -83,4 +116,4 @@ const decrypt = async (encryptedSum) => {
     return privateKey.decrypt(encryptedSum);
 };
 
-module.exports = { loadOrGenerateKeys, getPublicKey, getPrivateKey, decrypt };
+module.exports = { loadOrGenerateKeys, getPublicKey, getPrivateKey, decrypt, getShares };

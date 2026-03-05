@@ -1,20 +1,18 @@
 import { describe, it, expect } from 'vitest';
 import request from 'supertest';
-
-const BASE_URL = 'http://localhost:5000';
+import app from '../app.js';
 
 describe('Auth API Integration Tests', () => {
-    it('POST /api/auth/login should fail with invalid credentials', async () => {
-        const response = await request(BASE_URL)
-            .post('/api/auth/login')
+    it('POST /api/admin/login should fail with invalid credentials', async () => {
+        const response = await request(app)
+            .post('/api/admin/login')
             .send({
-                email: 'invalid@example.com',
-                password: 'wrongpassword'
+                username: 'invalid_user',
+                password: 'wrongpassword',
+                role: 'PRE_POLL'
             });
 
-        expect(response.status).toBe(400); // Or 401, depending on implementation
+        expect([401, 403]).toContain(response.status);
         expect(response.body).toHaveProperty('error');
     });
-
-    // Add more tests as needed, e.g., successful login if we have a seed user
 });

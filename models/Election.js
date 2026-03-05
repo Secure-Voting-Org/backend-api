@@ -43,9 +43,53 @@ const toggleKillSwitch = async (isActive) => {
     return { success: true, is_kill_switch_active: isActive };
 };
 
+// Archive Results (Called by Election Admin after Decryption)
+const archiveElectionResults = async (resultsJson, totalVotes) => {
+    const { saveElectionResult } = require('./ElectionHistory');
+    await saveElectionResult(resultsJson, totalVotes);
+    return { success: true };
+};
+
+// Reset System for New Election (Called by SysAdmin)
+const resetElection = async () => {
+    const fs = require('fs');
+    const path = require('path');
+
+    const client = await pool.connect();
+    try {
+        await client.query('BEGIN');
+
+        // Clear votes completely so table is empty
+        await client.query('TRUNCATE TABLE votes RESTART IDENTITY');
+
+        // Reset has_voted for all voters
+        await client.query('UPDATE voters SET has_voted = FALSE');
+
+        // Set phase back to PRE_POLL
+        await client.query('UPDATE election_config SET phase = $1 WHERE id = 1', ['PRE_POLL']);
+
+        // Delete existing Cryptographic Keys
+        const keysFile = path.join(__dirname, '../config/election_keys.json');
+        const sharesFile = path.join(__dirname, '../config/election_key_shares.json');
+        if (fs.existsSync(keysFile)) fs.unlinkSync(keysFile);
+        if (fs.existsSync(sharesFile)) fs.unlinkSync(sharesFile);
+
+        await client.query('COMMIT');
+        return { success: true };
+    } catch (e) {
+        await client.query('ROLLBACK');
+        console.error("Error during resetElection:", e);
+        throw e;
+    } finally {
+        client.release();
+    }
+};
+
 module.exports = {
     createElectionTable,
     getElectionStatus,
     updateElectionPhase,
-    toggleKillSwitch
+    toggleKillSwitch,
+    archiveElectionResults,
+    resetElection
 };

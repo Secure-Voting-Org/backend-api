@@ -707,10 +707,48 @@ app.post('/api/election/update', async (req, res) => {
 // Requirement 5.1.1.1 — GET current election phase state (public, no auth required)
 app.get('/api/election/status', async (req, res) => {
     try {
+        const { getElectionStatus } = require('./models/Election');
         const status = await getElectionStatus();
         res.json(status);
     } catch (err) {
         res.status(500).json({ error: 'Failed to fetch election status' });
+    }
+});
+
+// GET all historical election results
+app.get('/api/election/history', async (req, res) => {
+    try {
+        const { getElectionHistory } = require('./models/ElectionHistory');
+        const history = await getElectionHistory();
+        res.json(history);
+    } catch (err) {
+        console.error("Error fetching history:", err);
+        res.status(500).json({ error: 'Failed to fetch election history' });
+    }
+});
+
+// POST Archive Election (Election Admin Only)
+app.post('/api/admin/election/archive', async (req, res) => {
+    const { resultsJson, totalVotes } = req.body;
+    try {
+        const { archiveElectionResults } = require('./models/Election');
+        await archiveElectionResults(resultsJson, totalVotes);
+        res.json({ success: true, message: 'Election results archived successfully.' });
+    } catch (err) {
+        console.error("Error archiving election:", err);
+        res.status(500).json({ error: 'Failed to archive election results' });
+    }
+});
+
+// POST Reset Election (SysAdmin Only)
+app.post('/api/admin/election/reset', async (req, res) => {
+    try {
+        const { resetElection } = require('./models/Election');
+        await resetElection();
+        res.json({ success: true, message: 'Election has been fully reset.' });
+    } catch (err) {
+        console.error("Error resetting election:", err);
+        res.status(500).json({ error: 'Failed to reset election' });
     }
 });
 
@@ -747,13 +785,28 @@ app.get('/api/admin/votes', async (req, res) => {
     }
 });
 
-app.get('/api/admin/election/private-key', async (req, res) => {
+app.get('/api/admin/election/key-shares', async (req, res) => {
     // In production, Strict Auth Middleware here!
     try {
-        const key = await getPrivateKey();
-        res.json(key);
+        const { getShares } = require('./utils/encryption_keys');
+        const shares = getShares();
+        if (!shares) {
+            return res.status(404).json({ error: 'Key shares not found. Initialize election first.' });
+        }
+
+        // Log this highly sensitive access
+        const { createLog } = require('./models/Log');
+        await createLog({
+            event: 'KEY_SHARES_ACCESSED',
+            user_id: 'SYSTEM_ADMIN',
+            details: 'Election key shares downloaded for decryption ceremony',
+            ip_address: req.ip
+        });
+
+        res.json(shares);
     } catch (err) {
-        res.status(500).json({ error: 'Failed to fetch private key' });
+        console.error("Failed to fetch key shares:", err);
+        res.status(500).json({ error: 'Failed to fetch key shares' });
     }
 });
 
