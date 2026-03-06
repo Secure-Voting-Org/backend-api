@@ -1,6 +1,6 @@
 // Main entry point for the backend server
 const app = require('./app');
-require('dotenv').config();
+require('dotenv').config({ path: require('path').resolve(__dirname, '.env') });
 
 // Import database connection check
 const { checkDbConnection } = require('./config/db');

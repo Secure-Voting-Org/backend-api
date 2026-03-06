@@ -1,5 +1,5 @@
 const { Pool } = require('pg');
-require('dotenv').config();
+require('dotenv').config({ path: require('path').resolve(__dirname, '../.env') });
 
 // PostgreSQL Connection Pool
 // Uses DATABASE_URL (Neon/cloud) when set, falls back to individual vars for local dev
