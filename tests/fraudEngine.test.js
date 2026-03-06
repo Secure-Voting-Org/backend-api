@@ -1,20 +1,20 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { checkIpVelocity, FRAUD_CONFIG } from '../utils/fraudEngine';
+import { describe, it, expect, vi } from 'vitest';
+import { checkIpVelocity, checkDeviceVelocity, FRAUD_CONFIG } from '../utils/fraudEngine';
+
+// Mock the Log module to prevent real DB inserts during tests
+vi.mock('../models/Log', () => ({
+    createLog: vi.fn(),
+}));
 
 describe('Fraud Engine - Velocity Checks', () => {
-    let mockPool;
-
-    beforeEach(() => {
-        mockPool = {
-            query: vi.fn(),
-        };
-    });
 
     it('should return FALSE when velocity is below limit', async () => {
-        // Mock DB response: count = 1
-        mockPool.query.mockResolvedValueOnce({ rows: [{ count: 1 }] });
+        // Create an explicit mock pool
+        const mockPool = {
+            query: vi.fn().mockResolvedValueOnce({ rows: [{ count: 1 }] })
+        };
 
-        // Pass mockPool explicitly (Dependency Injection)
+        // Pass mockPool to the function directly (dependency injection)
         const result = await checkIpVelocity('127.0.0.1', 'REGISTRATION', mockPool);
 
         expect(result).toBe(false);
@@ -27,7 +27,10 @@ describe('Fraud Engine - Velocity Checks', () => {
 
     it('should return TRUE when velocity exceeds limit', async () => {
         const limit = FRAUD_CONFIG.REGISTRATION_VELOCITY_LIMIT;
-        mockPool.query.mockResolvedValueOnce({ rows: [{ count: limit }] });
+
+        const mockPool = {
+            query: vi.fn().mockResolvedValueOnce({ rows: [{ count: limit }] })
+        };
 
         const result = await checkIpVelocity('127.0.0.1', 'REGISTRATION', mockPool);
 
@@ -35,8 +38,12 @@ describe('Fraud Engine - Velocity Checks', () => {
     });
 
     it('should return FALSE for unknown action type', async () => {
+        const mockPool = { query: vi.fn() };
+
         const result = await checkIpVelocity('127.0.0.1', 'UNKNOWN_ACTION', mockPool);
+
         expect(result).toBe(false);
+        // The unknown action type returns false early, before querying the db
         expect(mockPool.query).not.toHaveBeenCalled();
     });
 });

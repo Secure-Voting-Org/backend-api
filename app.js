@@ -51,6 +51,26 @@ const { pool } = require('./config/db');
 // Load keys on start
 loadOrGenerateKeys().catch(err => console.error("Failed to load election keys:", err));
 
+// --- AI FACE DETECTION ENDPOINT ---
+// Mobile app sends base64 photo here; backend validates a real face exists before accepting registration
+app.post('/api/face/detect', async (req, res) => {
+    try {
+        const { image } = req.body;
+        if (!image) {
+            return res.status(400).json({ success: false, error: 'No image provided.' });
+        }
+        const { getDescriptorFromBase64 } = require('./utils/faceService');
+        const descriptor = await getDescriptorFromBase64(image);
+        if (!descriptor) {
+            return res.status(422).json({ success: false, error: 'No face detected. Please align your face to the camera and try again.' });
+        }
+        return res.json({ success: true, descriptor });
+    } catch (err) {
+        console.error('[FaceDetect] Error:', err);
+        return res.status(500).json({ success: false, error: 'Face validation failed: ' + err.message });
+    }
+});
+
 // --- REST API ROUTES ---
 
 app.get('/api/observer/export-ledger', async (req, res) => {
@@ -130,7 +150,7 @@ app.get('/api/audit/logs', async (req, res) => {
     }
 });
 
-app.get('/api/admin/list', async (req, res) => {
+app.get('/api/admin/list', authMiddleware, async (req, res) => {
     try {
         const admins = await getAllAdmins();
         res.json(admins);
@@ -165,7 +185,7 @@ app.put('/api/admin/:id', async (req, res) => {
     }
 });
 
-app.get('/api/admin/voters', async (req, res) => {
+app.get('/api/admin/voters', authMiddleware, async (req, res) => {
     try {
         const voters = await getAllVoters();
         res.json(voters);
@@ -299,7 +319,15 @@ app.post('/api/admin/login', async (req, res) => {
             ip_address: req.ip
         });
 
-        res.json({ success: true, admin: { id: admin.id, username: admin.username, role: admin.role, name: admin.full_name } });
+        // Generate Token & Session
+        const deviceHash = req.headers['x-device-hash'];
+        const clientIp = req.ip || req.headers['x-forwarded-for'] || req.connection.remoteAddress;
+        const userAgent = req.headers['user-agent'];
+
+        const token = generateToken(admin, deviceHash, admin.role);
+        await createSession(admin.id, token, deviceHash, clientIp, userAgent, admin.role);
+
+        res.json({ success: true, token, admin: { id: admin.id, username: admin.username, role: admin.role, name: admin.full_name } });
     } catch (err) {
         console.error(err);
         // Log system error
@@ -1106,6 +1134,24 @@ app.post('/api/registration/submit', async (req, res) => {
             return null;
         };
 
+        // --- PRE-PROCESS: FACE DESCRIPTOR (Mobile Support) ---
+        // If the descriptor is a string (base64 image from mobile), convert to float array
+        let finalFaceDescriptor = faceDescriptor;
+        if (typeof faceDescriptor === 'string' && (faceDescriptor.length > 1000 || faceDescriptor.startsWith('data:image'))) {
+            try {
+                const { getDescriptorFromBase64 } = require('./utils/faceService');
+                console.log("[Registration] Processing base64 face image from mobile...");
+                const extracted = await getDescriptorFromBase64(faceDescriptor);
+                if (!extracted) {
+                    return res.status(400).json({ error: 'No face detected in the biometric enrollment. Please try again with better lighting.' });
+                }
+                finalFaceDescriptor = extracted;
+            } catch (faceErr) {
+                console.error("[Registration] Face processing failed:", faceErr);
+                return res.status(500).json({ error: 'Failed to process biometric data: ' + faceErr.message });
+            }
+        }
+
         const registrationData = {
             referenceId: referenceId, // Pass the generated ID
             aadhaar: aadhaar,
@@ -1117,7 +1163,20 @@ app.post('/api/registration/submit', async (req, res) => {
             district: formData.district,
             constituency: formData.assemblyConstituency,
 
-            dob: `${formData.dobDay} / ${formData.dobMonth} / ${formData.dobYear}`,
+            dob: (() => {
+                // formData.dob is stored as YYYY-MM-DD (from DateTimePicker)
+                // or may be split into dobDay/dobMonth/dobYear (legacy/web)
+                if (formData.dob && formData.dob.includes('-')) {
+                    const [y, m, d] = formData.dob.split('-');
+                    const day = String(parseInt(d || '01')).padStart(2, '0');
+                    const month = String(parseInt(m || '01')).padStart(2, '0');
+                    return `${day} / ${month} / ${y}`; // DD / MM / YYYY = 13 chars
+                }
+                const day = String(parseInt(formData.dobDay || '01')).padStart(2, '0');
+                const month = String(parseInt(formData.dobMonth || '01')).padStart(2, '0');
+                const year = formData.dobYear || '2000';
+                return `${day} / ${month} / ${year}`; // 13 chars
+            })(),
             gender: formData.gender,
 
             mobile: formData.mobileSelf ? formData.mobileNumber : formData.mobileRelativeNumber,
@@ -1127,7 +1186,7 @@ app.post('/api/registration/submit', async (req, res) => {
 
             disability: formData.disabilityOtherSpec || (formData.disabilityCategories?.locomotive ? 'Locomotive' : 'None'),
 
-            faceDescriptor: faceDescriptor, // Model will verify array vs JSON string
+            faceDescriptor: finalFaceDescriptor, // Model will verify array vs JSON string
 
             // Files from formData (Base64 strings)
             // Extract base64 if object
@@ -1485,8 +1544,17 @@ app.post('/api/observer/login', async (req, res) => {
             return res.status(403).json({ error: 'Invalid credentials' });
         }
 
+        // Generate Token & Session
+        const deviceHash = req.headers['x-device-hash'];
+        const clientIp = req.ip || req.headers['x-forwarded-for'] || req.connection.remoteAddress;
+        const userAgent = req.headers['user-agent'];
+
+        const token = generateToken(observer, deviceHash, 'OBSERVER');
+        await createSession(observer.id, token, deviceHash, clientIp, userAgent, 'OBSERVER');
+
         res.json({
             success: true,
+            token,
             observer: {
                 id: observer.id,
                 username: observer.username,
@@ -1522,8 +1590,17 @@ app.post('/api/observer/register', async (req, res) => {
         // Auto-login or just success
         const observer = await findObserverByUsername(username);
 
+        // Generate Token & Session
+        const deviceHash = req.headers['x-device-hash'];
+        const clientIp = req.ip || req.headers['x-forwarded-for'] || req.connection.remoteAddress;
+        const userAgent = req.headers['user-agent'];
+
+        const token = generateToken(observer, deviceHash, 'OBSERVER');
+        await createSession(observer.id, token, deviceHash, clientIp, userAgent, 'OBSERVER');
+
         res.json({
             success: true,
+            token,
             observer: {
                 id: observer.id,
                 username: observer.username,
@@ -1914,8 +1991,17 @@ app.post('/api/sys-admin/login', async (req, res) => {
             return res.status(401).json({ error: 'Invalid credentials' });
         }
 
+        // Generate Token & Session
+        const deviceHash = req.headers['x-device-hash'];
+        const clientIp = req.ip || req.headers['x-forwarded-for'] || req.connection.remoteAddress;
+        const userAgent = req.headers['user-agent'];
+
+        const token = generateToken(admin, deviceHash, 'SYS_ADMIN');
+        await createSession(admin.id, token, deviceHash, clientIp, userAgent, 'SYS_ADMIN');
+
         res.json({
             success: true,
+            token,
             admin: {
                 id: admin.id,
                 username: admin.username,

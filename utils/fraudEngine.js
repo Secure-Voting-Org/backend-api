@@ -12,9 +12,10 @@ const FRAUD_CONFIG = {
  * Check if an IP has exceeded the velocity limit for a specific action.
  * @param {string} ipAddress - The IP address to check.
  * @param {string} actionType - 'REGISTRATION' or 'VOTE'.
+ * @param {object} [dbPool=pool] - Optional database pool for dependency injection in testing.
  * @returns {Promise<boolean>} - True if limit exceeded, False otherwise.
  */
-const checkIpVelocity = async (ipAddress, actionType) => {
+const checkIpVelocity = async (ipAddress, actionType, dbPool = pool) => {
     if (!ipAddress) return false;
 
     let table, timeColumn;
@@ -35,7 +36,7 @@ const checkIpVelocity = async (ipAddress, actionType) => {
         AND ${timeColumn} > NOW() - INTERVAL '1 hour'
     `;
 
-    const { rows } = await pool.query(query, [ipAddress]);
+    const { rows } = await dbPool.query(query, [ipAddress]);
     const count = parseInt(rows[0].count, 10);
 
     return count >= limit;
@@ -48,7 +49,7 @@ const checkIpVelocity = async (ipAddress, actionType) => {
  * @param {string} ipAddress - The source IP address.
  * @param {string} userId - Optional user ID related to the event.
  */
-const checkDeviceVelocity = async (deviceHash) => {
+const checkDeviceVelocity = async (deviceHash, dbPool = pool) => {
     if (!deviceHash) return false;
 
     const limit = FRAUD_CONFIG.REGISTRATION_VELOCITY_LIMIT; // Re-use same limit for now
@@ -61,7 +62,7 @@ const checkDeviceVelocity = async (deviceHash) => {
         AND created_at > NOW() - INTERVAL '1 hour'
     `;
 
-    const { rows } = await pool.query(query, [deviceHash]);
+    const { rows } = await dbPool.query(query, [deviceHash]);
     const count = parseInt(rows[0].count, 10);
 
     return count >= limit;
