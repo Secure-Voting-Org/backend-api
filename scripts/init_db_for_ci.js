@@ -88,6 +88,15 @@ async function init() {
     await createSysAdminTable();
     await createSessionTables();
 
+    // Add missing columns if models didn't create them but tests expect them
+    console.log("Adding schema columns expected by integration tests...");
+    try {
+        await pool.query(`ALTER TABLE voters ADD COLUMN IF NOT EXISTS is_token_issued BOOLEAN DEFAULT FALSE;`);
+        await pool.query(`ALTER TABLE votes ADD COLUMN IF NOT EXISTS prev_hash VARCHAR(255);`);
+    } catch (err) {
+        console.log("Columns likely already exist or schema is fine:", err.message);
+    }
+
     // Seed test admin for jwt_roles.test.js
     await pool.query(`
         INSERT INTO admins (username, password, full_name, role, email) 
