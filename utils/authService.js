@@ -3,8 +3,9 @@ const { pool } = require('../config/db');
 
 // Secret Key (In prod, use env variable)
 const JWT_SECRET = process.env.JWT_SECRET || 'securevote_secret_key_123';
-const TOKEN_EXPIRY = '2h'; // Token expires in 2 hours
-const IDLE_TIMEOUT_MINUTES = 15; // Inactivity timeout
+const TOKEN_EXPIRY = '8h'; // Token valid for 8 hours
+const VOTER_IDLE_TIMEOUT_MINUTES = 15;    // Voters: 15 min idle timeout
+const ADMIN_IDLE_TIMEOUT_MINUTES = 60;   // Admins/SysAdmins: 60 min idle timeout
 
 /**
  * Generate a JWT token for a user session.
@@ -28,6 +29,7 @@ const getSessionTableConfig = (role) => {
         case 'ELECTION_ADMIN':
         case 'PRE_POLL':
         case 'POST_POLL':
+        case 'LIVE':
             return { table: 'admin_sessions', idCol: 'admin_id' };
         case 'SYS_ADMIN':
             return { table: 'sysadmin_sessions', idCol: 'sysadmin_id' };
@@ -91,7 +93,11 @@ const verifySession = async (token, deviceHash, role = 'VOTER') => {
         const decoded = jwt.verify(token, JWT_SECRET);
 
         // 2. Device Binding Check
-        if (decoded.deviceHash && decoded.deviceHash !== deviceHash) {
+        // Only check if BOTH the token AND the request have a device hash,
+        // and they don't match. If either is missing/null, skip this check.
+        const tokenDeviceHash = decoded.deviceHash;
+        if (tokenDeviceHash && deviceHash && tokenDeviceHash !== deviceHash) {
+            console.warn(`[Auth] Device mismatch. Token has: '${tokenDeviceHash}', Request has: '${deviceHash}'`);
             return { valid: false, error: 'Device mismatch' };
         }
 
@@ -109,18 +115,20 @@ const verifySession = async (token, deviceHash, role = 'VOTER') => {
         const session = rows[0];
 
         if (!session) {
-            return { valid: false, error: 'Session invalidated' };
+            return { valid: false, error: 'Session not found or was invalidated. Please log in again.' };
         }
 
-        // 4. Idle Timeout Check
+        // 4. Idle Timeout Check (role-aware)
         const lastActive = new Date(session.last_active_at);
         const now = new Date();
         const diffMinutes = (now - lastActive) / 1000 / 60;
 
-        if (diffMinutes > IDLE_TIMEOUT_MINUTES) {
-            // Expire session
+        const isAdmin = ['ADMIN', 'ELECTION_ADMIN', 'SYS_ADMIN', 'PRE_POLL', 'POST_POLL', 'LIVE'].includes(tokenRole);
+        const idleTimeout = isAdmin ? ADMIN_IDLE_TIMEOUT_MINUTES : VOTER_IDLE_TIMEOUT_MINUTES;
+
+        if (diffMinutes > idleTimeout) {
             await pool.query(`UPDATE ${table} SET is_active = FALSE WHERE session_id = $1`, [session.session_id]);
-            return { valid: false, error: 'Session timed out due to inactivity' };
+            return { valid: false, error: `Session timed out after ${idleTimeout} minutes of inactivity. Please log in again.` };
         }
 
         // 5. Update Last Active
@@ -129,6 +137,12 @@ const verifySession = async (token, deviceHash, role = 'VOTER') => {
         return { valid: true, user: decoded, sessionId: session.session_id };
 
     } catch (err) {
+        if (err.name === 'TokenExpiredError') {
+            return { valid: false, error: 'Token has expired. Please log in again.' };
+        }
+        if (err.name === 'JsonWebTokenError') {
+            return { valid: false, error: 'Invalid token. Please log in again.' };
+        }
         return { valid: false, error: err.message };
     }
 };

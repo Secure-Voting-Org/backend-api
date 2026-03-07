@@ -25,6 +25,7 @@ const authMiddleware = async (req, res, next) => {
         const verification = await verifySession(token, deviceHash, decodedRole);
 
         if (!verification.valid) {
+            console.warn(`[Auth] Unauthorized access attempt: ${verification.error} (Role: ${decodedRole}, Device: ${deviceHash})`);
             return res.status(401).json({ error: 'Invalid or expired session: ' + verification.error });
         }
 
