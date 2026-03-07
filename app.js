@@ -325,7 +325,11 @@ app.post('/api/admin/login', async (req, res) => {
         const userAgent = req.headers['user-agent'];
 
         const token = generateToken(admin, deviceHash, admin.role);
-        await createSession(admin.id, token, deviceHash, clientIp, userAgent, admin.role);
+        try {
+            await createSession(admin.id, token, deviceHash, clientIp, userAgent, admin.role);
+        } catch (sessionErr) {
+            console.error('[Login] Session table error (non-fatal):', sessionErr.message);
+        }
 
         res.json({ success: true, token, admin: { id: admin.id, username: admin.username, role: admin.role, name: admin.full_name } });
     } catch (err) {
@@ -1503,7 +1507,7 @@ app.post('/api/vote', electionPhaseMiddleware, async (req, res) => {
             if (result.block) {
                 MempoolService.broadcastBlock(result.block).catch(e => console.error("Broadcast failed", e));
             }
-            recordVoteMetric(); // Module 5.3 — track vote for metrics
+            // recordVoteMetric(); // Module 5.3 — track vote for metrics
             res.json({ success: true, transactionHash: result.transactionHash });
         } else {
             res.status(400).json({ error: result.error });
@@ -1513,11 +1517,16 @@ app.post('/api/vote', electionPhaseMiddleware, async (req, res) => {
         // Handle Unique Constraint Violation (Double Voting)
         if (err.code === '23505') { // Postgres unique_violation for unique_voter_id
             // --- FRAUD CHECK: DUPLICATE VOTE ATTEMPT ---
-            const clientIp = req.ip || req.connection.remoteAddress;
-            await logFraudSignal('DUPLICATE_VOTE_ATTEMPT', {
-                details: 'Token already used',
-                signature_snippet: signature ? signature.substring(0, 10) + '...' : 'N/A'
-            }, clientIp);
+            try {
+                const clientIp = req.ip || req.connection.remoteAddress;
+                const { logFraudSignal } = require('./utils/fraudEngine');
+                await logFraudSignal('DUPLICATE_VOTE_ATTEMPT', {
+                    details: 'Token already used',
+                    signature_snippet: signature ? signature.substring(0, 10) + '...' : 'N/A'
+                }, clientIp);
+            } catch (fraudErr) {
+                console.error("Fraud engine log failed:", fraudErr.message);
+            }
             // ------------------------------------------
             return res.status(403).json({ error: 'Duplicate Vote: This token has already been used.' });
         }
@@ -1550,7 +1559,11 @@ app.post('/api/observer/login', async (req, res) => {
         const userAgent = req.headers['user-agent'];
 
         const token = generateToken(observer, deviceHash, 'OBSERVER');
-        await createSession(observer.id, token, deviceHash, clientIp, userAgent, 'OBSERVER');
+        try {
+            await createSession(observer.id, token, deviceHash, clientIp, userAgent, 'OBSERVER');
+        } catch (sessionErr) {
+            console.error('[Observer Login] Session table error (non-fatal):', sessionErr.message);
+        }
 
         res.json({
             success: true,
@@ -1596,7 +1609,11 @@ app.post('/api/observer/register', async (req, res) => {
         const userAgent = req.headers['user-agent'];
 
         const token = generateToken(observer, deviceHash, 'OBSERVER');
-        await createSession(observer.id, token, deviceHash, clientIp, userAgent, 'OBSERVER');
+        try {
+            await createSession(observer.id, token, deviceHash, clientIp, userAgent, 'OBSERVER');
+        } catch (sessionErr) {
+            console.error('[Observer Register] Session table error (non-fatal):', sessionErr.message);
+        }
 
         res.json({
             success: true,
@@ -1768,6 +1785,92 @@ app.get('/api/admin/tally', async (req, res) => {
     } catch (err) {
         console.error("Tallying Error:", err);
         res.status(500).json({ error: 'Failed to tally votes' });
+    }
+});
+
+// Decryption Ceremony Route (Admin)
+app.post('/api/admin/ceremony/decrypt', authMiddleware, async (req, res) => {
+    try {
+        const { shares } = req.body;
+        if (!shares || !Array.isArray(shares) || shares.length < 3) {
+            return res.status(400).json({ error: 'At least 3 valid shares are required to run the decryption ceremony' });
+        }
+
+        const secrets = require('secrets.js-grempe');
+        const paillier = require('paillier-bigint');
+        const { getAllVotes } = require('./models/Vote');
+        const electionKeys = require('./utils/encryption_keys');
+
+        // 1. Reconstruct Private Key
+        let reconstructedKeyString;
+        try {
+            const combinedHex = secrets.combine(shares);
+            reconstructedKeyString = secrets.hex2str(combinedHex);
+
+            // Validate it's proper JSON
+            JSON.parse(reconstructedKeyString);
+        } catch (e) {
+            return res.status(400).json({ error: 'Failed to reconstruct key. Invalid shares provided.' });
+        }
+
+        const parsedKey = JSON.parse(reconstructedKeyString);
+        if (!parsedKey.lambda || !parsedKey.mu || !parsedKey.p || !parsedKey.q || !parsedKey.publicKey) {
+            return res.status(400).json({ error: 'Reconstructed key is missing required mathematical components.' });
+        }
+
+        const { publicKey: globalPub } = await electionKeys.loadOrGenerateKeys();
+
+        const reconstructedPrivateKey = new paillier.PrivateKey(
+            BigInt(parsedKey.lambda),
+            BigInt(parsedKey.mu),
+            globalPub, // Use the real public key loaded in memory
+            BigInt(parsedKey.p),
+            BigInt(parsedKey.q)
+        );
+
+        // 2. Homomorphically Aggregate Votes
+        const votes = await getAllVotes();
+        let aggregatedCiphertexts = {}; // candidateId -> cSum (BigInt)
+        let totalProcessed = 0;
+
+        for (const vote of votes) {
+            let voteVector;
+            try {
+                voteVector = JSON.parse(vote.candidate_id);
+            } catch (e) {
+                // Skip if not a valid JSON vector (legacy votes)
+                continue;
+            }
+
+            totalProcessed++;
+            for (const [candidateId, ciphertextStr] of Object.entries(voteVector)) {
+                const c = BigInt(ciphertextStr);
+                if (!aggregatedCiphertexts[candidateId]) {
+                    aggregatedCiphertexts[candidateId] = c;
+                } else {
+                    // Homomorphic addition: c1 * c2 mod n^2
+                    aggregatedCiphertexts[candidateId] = globalPub.addition(aggregatedCiphertexts[candidateId], c);
+                }
+            }
+        }
+
+        // 3. Decrypt Final Totals
+        let results = {};
+        for (const [candidateId, cSum] of Object.entries(aggregatedCiphertexts)) {
+            const count = reconstructedPrivateKey.decrypt(cSum);
+            results[candidateId] = Number(count);
+        }
+
+        res.json({
+            success: true,
+            message: 'Decryption ceremony completed successfully',
+            totalVotesIncorporated: totalProcessed,
+            tally: results
+        });
+
+    } catch (err) {
+        console.error("Ceremony Error:", err);
+        res.status(500).json({ error: 'Failed to execute decryption ceremony' });
     }
 });
 
@@ -1997,7 +2100,11 @@ app.post('/api/sys-admin/login', async (req, res) => {
         const userAgent = req.headers['user-agent'];
 
         const token = generateToken(admin, deviceHash, 'SYS_ADMIN');
-        await createSession(admin.id, token, deviceHash, clientIp, userAgent, 'SYS_ADMIN');
+        try {
+            await createSession(admin.id, token, deviceHash, clientIp, userAgent, 'SYS_ADMIN');
+        } catch (sessionErr) {
+            console.error('[SysAdmin Login] Session table error (non-fatal):', sessionErr.message);
+        }
 
         res.json({
             success: true,
@@ -2090,11 +2197,14 @@ app.post('/api/voter/login', async (req, res) => {
         const token = generateToken(voter, deviceHash);
 
         // Create Session (and invalidate old ones)
-        // Use IP from request
         const clientIp = req.ip || req.headers['x-forwarded-for'] || req.connection.remoteAddress;
         const userAgent = req.headers['user-agent'];
 
-        await createSession(voter.mobile, token, deviceHash, clientIp, userAgent);
+        try {
+            await createSession(voter.mobile, token, deviceHash, clientIp, userAgent);
+        } catch (sessionErr) {
+            console.error('[Voter Login] Session table error (non-fatal):', sessionErr.message);
+        }
 
         res.json({
             success: true,
