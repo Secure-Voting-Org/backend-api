@@ -54,6 +54,15 @@ checkDbConnection().then(async () => {
         // (Render/Neon DB) automatically on every server start.
         // ============================================================
         const { pool } = require('./config/db');
+
+        // Ensure voters.mobile is unique so voter_sessions can reference it
+        try {
+            await pool.query('ALTER TABLE voters ADD CONSTRAINT voters_mobile_unique UNIQUE (mobile);');
+            console.log("Added UNIQUE constraint to voters.mobile");
+        } catch (err) {
+            // Error 42P07 means constraint already exists, just ignore it.
+        }
+
         await pool.query(`
             CREATE TABLE IF NOT EXISTS voter_sessions (
                 session_id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
