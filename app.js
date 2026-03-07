@@ -140,7 +140,7 @@ app.get('/api/election/public-key', async (req, res) => {
 });
 
 // --- AUDIT ROUTES ---
-app.get('/api/audit/logs', async (req, res) => {
+app.get('/api/audit/logs', authMiddleware, async (req, res) => {
     try {
         const logs = await getAllLogs();
         res.json(logs);
@@ -160,7 +160,7 @@ app.get('/api/admin/list', authMiddleware, async (req, res) => {
     }
 });
 
-app.delete('/api/admin/:id', async (req, res) => {
+app.delete('/api/admin/:id', authMiddleware, async (req, res) => {
     try {
         await deleteAdmin(req.params.id);
         res.json({ success: true, message: 'Admin deleted successfully' });
@@ -170,7 +170,7 @@ app.delete('/api/admin/:id', async (req, res) => {
     }
 });
 
-app.put('/api/admin/:id', async (req, res) => {
+app.put('/api/admin/:id', authMiddleware, async (req, res) => {
     const { fullName, email, role, password } = req.body;
     try {
         const updated = await updateAdmin(req.params.id, fullName, email, role, password);
@@ -459,7 +459,7 @@ app.post('/api/admin/clear-fake-votes', async (req, res) => {
 
 
 // Admin Registration
-app.post('/api/admin/register', async (req, res) => {
+app.post('/api/admin/register', authMiddleware, async (req, res) => {
     const { fullName, email, username, password, role } = req.body;
 
     try {
@@ -653,7 +653,7 @@ app.post('/api/p2p/block', async (req, res) => {
 });
 
 // 3.5 Integrity Alert Monitoring Endpoint
-app.get('/api/audit/integrity-status', async (req, res) => {
+app.get('/api/audit/integrity-status', authMiddleware, async (req, res) => {
     try {
         const BlockchainService = require('./services/BlockchainService');
         const status = BlockchainService.getIntegrityStatus();
