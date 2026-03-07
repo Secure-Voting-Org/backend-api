@@ -48,6 +48,70 @@ checkDbConnection().then(async () => {
         await createRecoveryTable();
         await createSysAdminTable();
 
+        // ============================================================
+        // SESSION TABLES - Critical for JWT auth on all portals.
+        // These are created here to ensure they exist in production
+        // (Render/Neon DB) automatically on every server start.
+        // ============================================================
+        const { pool } = require('./config/db');
+        await pool.query(`
+            CREATE TABLE IF NOT EXISTS voter_sessions (
+                session_id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                voter_id VARCHAR(255) REFERENCES voters(mobile) ON DELETE CASCADE,
+                token_hash VARCHAR(255) NOT NULL,
+                device_hash VARCHAR(255),
+                ip_address VARCHAR(45),
+                user_agent TEXT,
+                is_active BOOLEAN DEFAULT TRUE,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                last_active_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                expires_at TIMESTAMP NOT NULL
+            );
+        `);
+        await pool.query(`
+            CREATE TABLE IF NOT EXISTS admin_sessions (
+                session_id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                admin_id INTEGER REFERENCES admins(id) ON DELETE CASCADE,
+                token_hash VARCHAR(255) NOT NULL,
+                device_hash VARCHAR(255),
+                ip_address VARCHAR(45),
+                user_agent TEXT,
+                is_active BOOLEAN DEFAULT TRUE,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                last_active_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                expires_at TIMESTAMP NOT NULL
+            );
+        `);
+        await pool.query(`
+            CREATE TABLE IF NOT EXISTS sysadmin_sessions (
+                session_id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                sysadmin_id INTEGER REFERENCES sys_admins(id) ON DELETE CASCADE,
+                token_hash VARCHAR(255) NOT NULL,
+                device_hash VARCHAR(255),
+                ip_address VARCHAR(45),
+                user_agent TEXT,
+                is_active BOOLEAN DEFAULT TRUE,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                last_active_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                expires_at TIMESTAMP NOT NULL
+            );
+        `);
+        await pool.query(`
+            CREATE TABLE IF NOT EXISTS observer_sessions (
+                session_id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                observer_id INTEGER REFERENCES observers(id) ON DELETE CASCADE,
+                token_hash VARCHAR(255) NOT NULL,
+                device_hash VARCHAR(255),
+                ip_address VARCHAR(45),
+                user_agent TEXT,
+                is_active BOOLEAN DEFAULT TRUE,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                last_active_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                expires_at TIMESTAMP NOT NULL
+            );
+        `);
+        console.log("✅ All Session Tables Initialized (voter, admin, sysadmin, observer).");
+
         // Seed default Observer account
         createObserver('observer1', 'securepass', 'Election Observer One');
 
