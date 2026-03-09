@@ -21,6 +21,7 @@ const { createConstituencyTable } = require('./models/Constituency');
 const { createElectoralRollTable } = require('./models/ElectoralRoll');
 const { createRecoveryTable } = require('./models/RecoveryRequest');
 const { createSysAdminTable } = require('./models/SysAdmin');
+const { seedProduction } = require('./scripts/seed_production');
 
 
 
@@ -121,8 +122,11 @@ checkDbConnection().then(async () => {
         `);
         console.log("✅ All Session Tables Initialized (voter, admin, sysadmin, observer).");
 
-        // Seed default Observer account
+        // Seed Observer
         createObserver('observer1', 'securepass', 'Election Observer One');
+
+        // Auto-seed constituencies & candidates into production DB if empty
+        await seedProduction();
 
         // Initialize Blockchain Service for secure logging
         const BlockchainService = require('./services/BlockchainService');
