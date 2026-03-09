@@ -13,6 +13,14 @@ const createObserverTable = async () => {
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
     ) `;
     await pool.query(query);
+
+    // Migration to rename old column if it exists
+    try {
+        await pool.query('ALTER TABLE observers RENAME COLUMN username TO mobile_number');
+        console.log("Migrated observers table: renamed username to mobile_number");
+    } catch (err) {
+        // Ignored. Column is probably already renamed or doesn't exist.
+    }
 };
 
 // Find Observer by Mobile Number

@@ -123,7 +123,7 @@ checkDbConnection().then(async () => {
         console.log("✅ All Session Tables Initialized (voter, admin, sysadmin, observer).");
 
         // Seed Observer
-        createObserver('observer1', 'securepass', 'Election Observer One');
+        createObserver('9999999990', 'securepass', 'Election Observer One');
 
         // Auto-seed constituencies & candidates into production DB if empty
         await seedProduction();

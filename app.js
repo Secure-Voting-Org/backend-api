@@ -33,7 +33,7 @@ const { generateToken, createSession, invalidateSession } = require('./utils/aut
 const authMiddleware = require('./middleware/authMiddleware');
 
 const { getCandidatesByConstituency, getCandidatesByMetadata, createCandidate, getAllCandidates, updateCandidate, deleteCandidate } = require('./models/Candidate');
-const { findObserverByUsername, createObserver } = require('./models/Observer');
+const { findObserverByMobile, createObserver } = require('./models/Observer');
 const { castVote, getTurnoutStats, getPublicLedger, getAllVotes } = require('./models/Vote');
 
 const { findAdminByUsername, findAdminByEmail, createAdmin, storeOtp, verifyOtp, updateAdminPassword, getAllAdmins, updateAdmin, deleteAdmin } = require('./models/Admin');
