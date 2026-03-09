@@ -17,11 +17,23 @@ const createConstituencyTable = async () => {
         await pool.query('ALTER TABLE constituencies ADD COLUMN IF NOT EXISTS state VARCHAR(100)');
     } catch (err) { /* ignore */ }
 
+    // Remove duplicates before adding UNIQUE constraint
+    try {
+        await pool.query(`
+            DELETE FROM constituencies a USING constituencies b
+            WHERE a.id > b.id AND a.name = b.name
+        `);
+    } catch (err) {
+        console.error("Error removing duplicate constituencies:", err);
+    }
+
     // Add UNIQUE constraint on name for existing tables that were created without it
     try {
         await pool.query('ALTER TABLE constituencies ADD CONSTRAINT constituencies_name_unique UNIQUE (name)');
         console.log("Added UNIQUE constraint to constituencies.name");
-    } catch (err) { /* Constraint already exists — ignore */ }
+    } catch (err) { 
+        // Constraint already exists or another error
+    }
 
     console.log("Constituency table checked/created.");
 };

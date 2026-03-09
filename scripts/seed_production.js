@@ -115,21 +115,21 @@ const getDefaultCandidates = (constituencyName) => {
 const seedProduction = async () => {
     try {
         // ─── CONSTITUENCIES & CANDIDATES ───────────────────────────────────────
-        const { rows } = await pool.query('SELECT COUNT(*) as count FROM constituencies');
-        const count = parseInt(rows[0].count, 10);
-
-        if (count > 0) {
-            console.log(`[Seed] Constituencies already seeded (${count} found). Skipping.`);
-        } else {
-            console.log('[Seed] Starting production seed for constituencies and candidates...');
-            const client = await pool.connect();
-            try {
-                await client.query('BEGIN');
-                for (const c of constituencies) {
-                    await client.query(
-                        `INSERT INTO constituencies (name, district, state) VALUES ($1, $2, $3) ON CONFLICT (name) DO NOTHING`,
-                        [c.name, c.district, c.state]
-                    );
+        console.log('[Seed] Starting production seed/update for constituencies and candidates...');
+        const client = await pool.connect();
+        try {
+            await client.query('BEGIN');
+            for (const c of constituencies) {
+                // Upsert constituency
+                await client.query(
+                    `INSERT INTO constituencies (name, district, state) VALUES ($1, $2, $3) 
+                     ON CONFLICT (name) DO UPDATE SET district = EXCLUDED.district, state = EXCLUDED.state`,
+                    [c.name, c.district, c.state]
+                );
+                
+                // Only insert candidates if this constituency has NO candidates yet
+                const { rows: candRows } = await client.query('SELECT COUNT(*) as ccount FROM candidates WHERE constituency = $1', [c.name]);
+                if (parseInt(candRows[0].ccount, 10) === 0) {
                     const candidates = candidatesByConstituency[c.name] || getDefaultCandidates(c.name);
                     for (const cand of candidates) {
                         await client.query(
@@ -138,14 +138,14 @@ const seedProduction = async () => {
                         );
                     }
                 }
-                await client.query('COMMIT');
-                console.log(`[Seed] ✅ Seeded ${constituencies.length} constituencies and their candidates.`);
-            } catch (err) {
-                await client.query('ROLLBACK');
-                console.error('[Seed] ❌ Constituency seeding failed, rolled back:', err.message);
-            } finally {
-                client.release();
             }
+            await client.query('COMMIT');
+            console.log(`[Seed] ✅ Constituencies and candidates updated/seeded.`);
+        } catch (err) {
+            await client.query('ROLLBACK');
+            console.error('[Seed] ❌ Constituency seeding failed, rolled back:', err.message);
+        } finally {
+            client.release();
         }
 
         // ─── ELECTORAL ROLL (AADHAAR CITIZENS) ─────────────────────────────────
