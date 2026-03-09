@@ -22,6 +22,8 @@ jobs:
           cache: "npm"
       - name: Install dependencies
         run: npm ci || npm install
+      - name: Run DB migrations
+        run: node scripts/init_db_for_ci.js
       - name: Run tests
         run: npm test --if-present
 
