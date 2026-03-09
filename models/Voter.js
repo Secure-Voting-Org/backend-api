@@ -254,7 +254,7 @@ const approveRegistration = async (applicationId) => {
         if (app.status !== 'PENDING') throw new Error("Application is not pending");
 
         // 2. Generate Voter ID (Format: RDV + 7 Random Digits)
-        const voterId = `RDV${Math.floor(1000000 + Math.random() * 9000000)} `;
+        const voterId = `RDV${Math.floor(1000000 + Math.random() * 9000000)}`;
 
         // 3. Insert into Voters Table
         const insertQuery = `
