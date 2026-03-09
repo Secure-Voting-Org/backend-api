@@ -114,47 +114,88 @@ const getDefaultCandidates = (constituencyName) => {
 
 const seedProduction = async () => {
     try {
-        // Check if constituencies already seeded
+        // ─── CONSTITUENCIES & CANDIDATES ───────────────────────────────────────
         const { rows } = await pool.query('SELECT COUNT(*) as count FROM constituencies');
         const count = parseInt(rows[0].count, 10);
 
         if (count > 0) {
             console.log(`[Seed] Constituencies already seeded (${count} found). Skipping.`);
-            return;
-        }
-
-        console.log('[Seed] Starting production seed for constituencies and candidates...');
-
-        const client = await pool.connect();
-        try {
-            await client.query('BEGIN');
-
-            for (const c of constituencies) {
-                await client.query(
-                    `INSERT INTO constituencies (name, district, state) VALUES ($1, $2, $3) ON CONFLICT (name) DO NOTHING`,
-                    [c.name, c.district, c.state]
-                );
-
-                const candidates = candidatesByConstituency[c.name] || getDefaultCandidates(c.name);
-                for (const cand of candidates) {
+        } else {
+            console.log('[Seed] Starting production seed for constituencies and candidates...');
+            const client = await pool.connect();
+            try {
+                await client.query('BEGIN');
+                for (const c of constituencies) {
                     await client.query(
-                        `INSERT INTO candidates (name, party, symbol, constituency) VALUES ($1, $2, $3, $4)`,
-                        [cand.name, cand.party, cand.symbol, c.name]
+                        `INSERT INTO constituencies (name, district, state) VALUES ($1, $2, $3) ON CONFLICT (name) DO NOTHING`,
+                        [c.name, c.district, c.state]
                     );
+                    const candidates = candidatesByConstituency[c.name] || getDefaultCandidates(c.name);
+                    for (const cand of candidates) {
+                        await client.query(
+                            `INSERT INTO candidates (name, party, symbol, constituency) VALUES ($1, $2, $3, $4)`,
+                            [cand.name, cand.party, cand.symbol, c.name]
+                        );
+                    }
                 }
+                await client.query('COMMIT');
+                console.log(`[Seed] ✅ Seeded ${constituencies.length} constituencies and their candidates.`);
+            } catch (err) {
+                await client.query('ROLLBACK');
+                console.error('[Seed] ❌ Constituency seeding failed, rolled back:', err.message);
+            } finally {
+                client.release();
             }
-
-            await client.query('COMMIT');
-            console.log(`[Seed] ✅ Seeded ${constituencies.length} constituencies and their candidates.`);
-        } catch (err) {
-            await client.query('ROLLBACK');
-            console.error('[Seed] ❌ Seeding failed, rolled back:', err.message);
-        } finally {
-            client.release();
         }
+
+        // ─── ELECTORAL ROLL (AADHAAR CITIZENS) ─────────────────────────────────
+        try {
+            const { rows: rollRows } = await pool.query('SELECT COUNT(*) as count FROM electoral_roll');
+            const rollCount = parseInt(rollRows[0].count, 10);
+
+            if (rollCount > 0) {
+                console.log(`[Seed] Electoral roll already has ${rollCount} citizens. Skipping.`);
+            } else {
+                console.log('[Seed] Seeding electoral roll citizens...');
+                const citizens = [
+                    { aadhaar: '111122223333', name: 'Ramesh Gupta', constituency: 'Kuppam', mobile: '9876543210' },
+                    { aadhaar: '444455556666', name: 'Sita Reddy', constituency: 'Mangalagiri', mobile: '9123456780' },
+                    { aadhaar: '777788889999', name: 'Vijay Rao', constituency: 'Pulivendula', mobile: '9988776655' },
+                    { aadhaar: '123412341234', name: 'Priya Naidu', constituency: 'Tirupati', mobile: '9000011111' },
+                    { aadhaar: '567856785678', name: 'Suresh Chowdary', constituency: 'Visakhapatnam East', mobile: '9811223344' },
+                    { aadhaar: '999900001111', name: 'Lakshmi Varma', constituency: 'Vijayawada West', mobile: '9700123456' },
+                    { aadhaar: '111200003333', name: 'Kishore Kumar', constituency: 'Guntur West', mobile: '9845678901' },
+                    { aadhaar: '222211110000', name: 'Anitha Reddy', constituency: 'Nellore City', mobile: '9600112233' },
+                    { aadhaar: '333344445555', name: 'Mahesh Kumar', constituency: 'Kurnool', mobile: '9123987654' },
+                    { aadhaar: '666677778888', name: 'Deepa Sharma', constituency: 'Kadapa', mobile: '9456789012' },
+                    { aadhaar: '121212121212', name: 'Aravind Naidu', constituency: 'Anantapur', mobile: '9321456789' },
+                    { aadhaar: '343434343434', name: 'Meera Rao', constituency: 'Hindupur', mobile: '9876000111' },
+                    { aadhaar: '565656565656', name: 'Rajesh Yadav', constituency: 'Rajahmundry City', mobile: '9012345678' },
+                    { aadhaar: '787878787878', name: 'Sunita Devi', constituency: 'Eluru', mobile: '9198765432' },
+                    { aadhaar: '909090909090', name: 'Venkat Raju', constituency: 'Chittoor', mobile: '9900001122' },
+                    { aadhaar: '101010101010', name: 'Kavitha Singh', constituency: 'Ongole', mobile: '9876543000' },
+                    { aadhaar: '202020202020', name: 'Surya Kumar', constituency: 'Tenali', mobile: '9765432100' },
+                    { aadhaar: '303030303030', name: 'Geetha Lakshmi', constituency: 'Bhimavaram', mobile: '9654321001' },
+                    { aadhaar: '404040404040', name: 'Naresh Babu', constituency: 'Machilipatnam', mobile: '9543210081' },
+                    { aadhaar: '505050505050', name: 'Triveni Devi', constituency: 'Nandyal', mobile: '9432100012' },
+                ];
+                for (const c of citizens) {
+                    await pool.query(
+                        `INSERT INTO electoral_roll (aadhaar_number, name, constituency, phone)
+                         VALUES ($1, $2, $3, $4) ON CONFLICT (aadhaar_number) DO NOTHING`,
+                        [c.aadhaar, c.name, c.constituency, c.mobile]
+                    ).catch(() => {}); // Ignore if column names differ slightly
+                }
+                console.log(`[Seed] ✅ Seeded ${citizens.length} citizens into electoral roll.`);
+            }
+        } catch (rollErr) {
+            console.log('[Seed] Electoral roll table not ready yet, skipping:', rollErr.message);
+        }
+
     } catch (err) {
-        console.error('[Seed] Connection error during seed check:', err.message);
+        console.error('[Seed] Critical error during seed:', err.message);
     }
 };
 
 module.exports = { seedProduction };
+

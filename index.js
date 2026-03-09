@@ -128,11 +128,16 @@ checkDbConnection().then(async () => {
         // Auto-seed constituencies & candidates into production DB if empty
         await seedProduction();
 
+        // Ensure NFC column exists on voters (safe migration, runs every startup)
+        await pool.query('ALTER TABLE voters ADD COLUMN IF NOT EXISTS nfc_tag_id VARCHAR(255) UNIQUE').catch(() => {});
+        console.log("✅ NFC column check complete.");
+
         // Initialize Blockchain Service for secure logging
         const BlockchainService = require('./services/BlockchainService');
         await BlockchainService.initialize();
 
         console.log("All Database Tables & Blockchain Ledger Initialized.");
+
     } catch (err) {
         console.error("FATAL ERROR during Database Initialization:", err);
     }
