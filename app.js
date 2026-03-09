@@ -2578,7 +2578,9 @@ app.post('/api/results/declare/:constituencyId', async (req, res) => {
 
 // Helper: verify sysadmin token
 const verifySysAdmin = (req, res, next) => {
-    const auth = req.headers.authorization;
+    let auth = req.headers.authorization;
+    if (!auth && req.query.token) auth = `Bearer ${req.query.token}`;
+
     if (!auth || !auth.startsWith('Bearer ')) return res.status(401).json({ error: 'Unauthorized' });
     try {
         const jwt = require('jsonwebtoken');
@@ -2720,6 +2722,81 @@ app.get('/api/sysadmin/export-voters', verifySysAdmin, async (req, res) => {
     }
 });
 
+// ── SSE Real-Time Audit Stream ─────────────────────────
+
+// GET /api/audit/stream - Server-Sent Events for live logs
+app.get('/api/audit/stream', verifySysAdmin, (req, res) => {
+    res.setHeader('Content-Type', 'text/event-stream');
+    res.setHeader('Cache-Control', 'no-cache');
+    res.setHeader('Connection', 'keep-alive');
+    res.flushHeaders(); // flush the headers to establish SSE connection immediately
+
+    // Send an initial ping
+    res.write('data: {"type": "ping"}\n\n');
+
+    const handleNewLog = (channel, payload) => {
+        // payload from pg_notify is usually just the JSON string
+        res.write(`data: ${payload}\n\n`);
+    };
+
+    // We can simulate the live feed by polling or using PG Notify
+    // For simplicity without setting up PG triggers: poll every 3s
+    let lastId = 0;
+    const fetchLatest = async () => {
+        try {
+            const { rows } = await pool.query('SELECT * FROM audit_logs ORDER BY id DESC LIMIT 1');
+            if (rows.length > 0 && rows[0].id > lastId) {
+                if (lastId !== 0) {
+                    res.write(`data: ${JSON.stringify(rows[0])}\n\n`);
+                }
+                lastId = rows[0].id;
+            }
+        } catch (err) { /* ignore */ }
+    };
+
+    // Initial fetch to get max id
+    fetchLatest();
+    const interval = setInterval(fetchLatest, 3000);
+
+    req.on('close', () => {
+        clearInterval(interval);
+    });
+});
+
+// ── Blockchain Ledger ────────────────────────────────────
+
+// GET /api/audit/ledger - Get raw blocks
+app.get('/api/audit/ledger', verifySysAdmin, async (req, res) => {
+    try {
+        const rows = await getPublicLedger(100); // from models/Vote.js
+        res.json(rows);
+    } catch (err) {
+        res.status(500).json({ error: 'Failed to fetch ledger' });
+    }
+});
+
+// ── SysAdmin Profile ─────────────────────────────────────
+
+// PUT /api/sysadmin/change-password
+app.put('/api/sysadmin/change-password', verifySysAdmin, async (req, res) => {
+    try {
+        const { currentPassword, newPassword } = req.body;
+        if (!currentPassword || !newPassword) return res.status(400).json({ error: 'Missing fields' });
+
+        const admin = await findSysAdminByUsername(req.sysadmin.username || 'sys_admin');
+        if (!admin || admin.password !== currentPassword) {
+            return res.status(401).json({ error: 'Invalid current password' });
+        }
+
+        await pool.query('UPDATE sys_admins SET password = $1 WHERE username = $2', [newPassword, admin.username]);
+        res.json({ success: true, message: 'Password updated successfully' });
+    } catch (err) {
+        console.error(err);
+        res.status(500).json({ error: 'Update failed' });
+    }
+});
+
 // Export the app for use in index.js
 module.exports = app;
+
 
