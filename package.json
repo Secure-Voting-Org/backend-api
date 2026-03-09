@@ -27,7 +27,8 @@
     "nodemailer": "^8.0.1",
     "paillier-bigint": "^3.4.3",
     "pg": "^8.18.0",
-    "secrets.js-grempe": "^2.0.0"
+    "secrets.js-grempe": "^2.0.0",
+    "twilio": "^5.12.2"
   },
   "devDependencies": {
     "@vitest/ui": "^4.0.18",

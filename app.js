@@ -1536,9 +1536,9 @@ app.post('/api/vote', electionPhaseMiddleware, async (req, res) => {
 
 // Observer Login
 app.post('/api/observer/login', async (req, res) => {
-    const { username, password, role } = req.body;
+    const { mobile_number, password, role } = req.body;
     try {
-        const observer = await findObserverByUsername(username);
+        const observer = await findObserverByMobile(mobile_number);
         if (!observer) {
             return res.status(401).json({ error: 'Invalid credentials' });
         }
@@ -1570,7 +1570,7 @@ app.post('/api/observer/login', async (req, res) => {
             token,
             observer: {
                 id: observer.id,
-                username: observer.username,
+                mobile_number: observer.mobile_number,
                 full_name: observer.full_name,
                 role: observer.role
             }
@@ -1583,25 +1583,25 @@ app.post('/api/observer/login', async (req, res) => {
 
 // Observer Registration
 app.post('/api/observer/register', async (req, res) => {
-    const { username, password, fullName, role, email } = req.body;
+    const { mobile_number, password, fullName, role, email } = req.body;
     try {
-        if (!username || !password || !fullName || !email) {
+        if (!mobile_number || !password || !fullName || !email) {
             return res.status(400).json({ error: 'All fields are required' });
         }
 
         const validRoles = ['general', 'expenditure'];
         const observerRole = validRoles.includes(role) ? role : 'general';
 
-        const existing = await findObserverByUsername(username);
+        const existing = await findObserverByMobile(mobile_number);
         if (existing) {
-            return res.status(400).json({ error: 'Username already exists' });
+            return res.status(400).json({ error: 'Mobile number already exists' });
         }
 
         // In a real app, hash password here
-        await createObserver(username, password, fullName, observerRole, email);
+        await createObserver(mobile_number, password, fullName, observerRole, email);
 
         // Auto-login or just success
-        const observer = await findObserverByUsername(username);
+        const observer = await findObserverByMobile(mobile_number);
 
         // Generate Token & Session
         const deviceHash = req.headers['x-device-hash'];
@@ -1620,7 +1620,7 @@ app.post('/api/observer/register', async (req, res) => {
             token,
             observer: {
                 id: observer.id,
-                username: observer.username,
+                mobile_number: observer.mobile_number,
                 full_name: observer.full_name,
                 role: observer.role,
                 email: observer.email
@@ -2571,6 +2571,52 @@ app.post('/api/results/declare/:constituencyId', async (req, res) => {
     }
 });
 
-// Export the app for use in index.js
+// Export the app for use in index.js// --- AADHAAR API MOCK ---
+const { sendSmsOTP } = require('./services/smsService');
+const aadhaarOtpStore = {}; // in-memory store for demo: { aadhaarNumber: otp }
+
+app.post('/api/aadhaar/generate-otp', async (req, res) => {
+    const { aadhaarNumber, mobileNumber } = req.body;
+    if (!aadhaarNumber || aadhaarNumber.length !== 12) {
+        return res.status(400).json({ error: 'Valid 12-digit Aadhaar number required' });
+    }
+    if (!mobileNumber || mobileNumber.length !== 10) {
+        return res.status(400).json({ error: 'Valid 10-digit mobile number required' });
+    }
+
+    // Generate a 6-digit OTP
+    const otp = Math.floor(100000 + Math.random() * 900000).toString();
+    aadhaarOtpStore[aadhaarNumber] = otp;
+
+    console.log(`[Aadhaar MOCK API] OTP generated for Aadhaar ${aadhaarNumber}: ${otp}`);
+
+    // Send Real SMS
+    const smsResult = await sendSmsOTP(mobileNumber, otp);
+
+    if (smsResult.success) {
+        res.json({ success: true, message: 'OTP sent to registered mobile number' });
+    } else {
+        // Fallback for local testing without Twilio keys
+        console.warn('SMS Failed. Please check backend console for OTP.');
+        res.json({ success: true, message: 'OTP generated (Check backend console - SMS Failed)' });
+    }
+});
+
+app.post('/api/aadhaar/verify-otp', async (req, res) => {
+    const { aadhaarNumber, otp } = req.body;
+
+    if (!aadhaarOtpStore[aadhaarNumber]) {
+        return res.status(400).json({ error: 'OTP expired or not requested' });
+    }
+
+    if (aadhaarOtpStore[aadhaarNumber] !== otp) {
+        return res.status(400).json({ error: 'Invalid OTP' });
+    }
+
+    // Success
+    delete aadhaarOtpStore[aadhaarNumber];
+    res.json({ success: true, message: 'Aadhaar Verified Successfully' });
+});
+
 module.exports = app;
 

@@ -5,7 +5,7 @@ const createObserverTable = async () => {
     const query = `
     CREATE TABLE IF NOT EXISTS observers (
         id SERIAL PRIMARY KEY,
-        username VARCHAR(50) NOT NULL UNIQUE,
+        mobile_number VARCHAR(15) NOT NULL UNIQUE,
         password VARCHAR(255) NOT NULL, -- Storing plain text for demo, should be hashed in prod
         full_name VARCHAR(100),
         email VARCHAR(100),
@@ -15,10 +15,10 @@ const createObserverTable = async () => {
     await pool.query(query);
 };
 
-// Find Observer by Username
-const findObserverByUsername = async (username) => {
-    const query = 'SELECT * FROM observers WHERE username = $1';
-    const { rows } = await pool.query(query, [username]);
+// Find Observer by Mobile Number
+const findObserverByMobile = async (mobileNumber) => {
+    const query = 'SELECT * FROM observers WHERE mobile_number = $1';
+    const { rows } = await pool.query(query, [mobileNumber]);
     return rows[0];
 };
 
@@ -30,20 +30,20 @@ const findObserverByEmail = async (email) => {
 };
 
 // Create Observer (for seeding or registration)
-const createObserver = async (username, password, fullName, role = 'general', email) => {
+const createObserver = async (mobileNumber, password, fullName, role = 'general', email) => {
     // Check if exists first
-    const existing = await findObserverByUsername(username);
+    const existing = await findObserverByMobile(mobileNumber);
     if (existing) return;
 
-    const query = 'INSERT INTO observers (username, password, full_name, role, email) VALUES ($1, $2, $3, $4, $5)';
-    await pool.query(query, [username, password, fullName, role, email]);
-    console.log(`Observer ${username} (${role}) created.`);
+    const query = 'INSERT INTO observers (mobile_number, password, full_name, role, email) VALUES ($1, $2, $3, $4, $5)';
+    await pool.query(query, [mobileNumber, password, fullName, role, email]);
+    console.log(`Observer ${mobileNumber} (${role}) created.`);
 };
 
 // Update Observer Password
-const updateObserverPassword = async (username, newPassword) => {
-    const query = 'UPDATE observers SET password = $1 WHERE username = $2';
-    await pool.query(query, [newPassword, username]);
+const updateObserverPassword = async (mobileNumber, newPassword) => {
+    const query = 'UPDATE observers SET password = $1 WHERE mobile_number = $2';
+    await pool.query(query, [newPassword, mobileNumber]);
 };
 
-module.exports = { createObserverTable, findObserverByUsername, createObserver, updateObserverPassword, findObserverByEmail };
+module.exports = { createObserverTable, findObserverByMobile, createObserver, updateObserverPassword, findObserverByEmail };
