@@ -5,19 +5,23 @@ const createConstituencyTable = async () => {
     const query = `
     CREATE TABLE IF NOT EXISTS constituencies (
         id SERIAL PRIMARY KEY,
-        name VARCHAR(100) NOT NULL,
+        name VARCHAR(100) NOT NULL UNIQUE,
         district VARCHAR(100),
         state VARCHAR(100),
         voter_count INT DEFAULT 0
     )`;
     await pool.query(query);
 
-    // Check if column exists (for existing tables)
+    // Add missing columns for existing tables
     try {
         await pool.query('ALTER TABLE constituencies ADD COLUMN IF NOT EXISTS state VARCHAR(100)');
-    } catch (err) {
-        console.log("Column 'state' might already exist or error adding it:", err.message);
-    }
+    } catch (err) { /* ignore */ }
+
+    // Add UNIQUE constraint on name for existing tables that were created without it
+    try {
+        await pool.query('ALTER TABLE constituencies ADD CONSTRAINT constituencies_name_unique UNIQUE (name)');
+        console.log("Added UNIQUE constraint to constituencies.name");
+    } catch (err) { /* Constraint already exists — ignore */ }
 
     console.log("Constituency table checked/created.");
 };

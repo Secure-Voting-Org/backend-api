@@ -2571,6 +2571,155 @@ app.post('/api/results/declare/:constituencyId', async (req, res) => {
     }
 });
 
+// =========================================================
+// SYSADMIN ROUTES — Electoral Roll, Observers, Voter Export
+// Protected by sysadmin JWT (same authMiddleware with role check)
+// =========================================================
+
+// Helper: verify sysadmin token
+const verifySysAdmin = (req, res, next) => {
+    const auth = req.headers.authorization;
+    if (!auth || !auth.startsWith('Bearer ')) return res.status(401).json({ error: 'Unauthorized' });
+    try {
+        const jwt = require('jsonwebtoken');
+        const decoded = jwt.verify(auth.split(' ')[1], process.env.JWT_SECRET || 'fallback_secret');
+        if (decoded.role !== 'SYSADMIN') return res.status(403).json({ error: 'Forbidden' });
+        req.sysadmin = decoded;
+        next();
+    } catch (e) {
+        return res.status(401).json({ error: 'Invalid token' });
+    }
+};
+
+// ── Electoral Roll ──────────────────────────────────────
+
+// GET /api/sysadmin/electoral-roll - List all citizens
+app.get('/api/sysadmin/electoral-roll', verifySysAdmin, async (req, res) => {
+    try {
+        const { search, constituency } = req.query;
+        let query = 'SELECT * FROM electoral_roll';
+        const params = [];
+        const conditions = [];
+        if (search) { params.push(`%${search}%`); conditions.push(`(name ILIKE $${params.length} OR aadhaar_number ILIKE $${params.length})`); }
+        if (constituency) { params.push(constituency); conditions.push(`constituency = $${params.length}`); }
+        if (conditions.length > 0) query += ' WHERE ' + conditions.join(' AND ');
+        query += ' ORDER BY created_at DESC LIMIT 200';
+        const { rows } = await pool.query(query, params);
+        res.json(rows);
+    } catch (err) {
+        console.error('Electoral roll list error:', err);
+        res.status(500).json({ error: 'Failed to fetch electoral roll' });
+    }
+});
+
+// POST /api/sysadmin/electoral-roll - Add a citizen
+app.post('/api/sysadmin/electoral-roll', verifySysAdmin, async (req, res) => {
+    try {
+        const { aadhaar_number, name, phone, constituency } = req.body;
+        if (!aadhaar_number || !name || !phone || !constituency) {
+            return res.status(400).json({ error: 'aadhaar_number, name, phone, and constituency are required' });
+        }
+        if (!/^\d{12}$/.test(aadhaar_number)) {
+            return res.status(400).json({ error: 'Aadhaar must be exactly 12 digits' });
+        }
+        const { rows } = await pool.query(
+            `INSERT INTO electoral_roll (aadhaar_number, name, phone, constituency)
+             VALUES ($1, $2, $3, $4) ON CONFLICT (aadhaar_number) DO NOTHING RETURNING *`,
+            [aadhaar_number, name, phone, constituency]
+        );
+        if (rows.length === 0) return res.status(409).json({ error: 'Aadhaar number already exists in electoral roll' });
+        res.status(201).json({ success: true, citizen: rows[0] });
+    } catch (err) {
+        console.error('Add citizen error:', err);
+        res.status(500).json({ error: 'Failed to add citizen' });
+    }
+});
+
+// DELETE /api/sysadmin/electoral-roll/:aadhaar - Remove a citizen
+app.delete('/api/sysadmin/electoral-roll/:aadhaar', verifySysAdmin, async (req, res) => {
+    try {
+        const { aadhaar } = req.params;
+        const { rowCount } = await pool.query('DELETE FROM electoral_roll WHERE aadhaar_number = $1', [aadhaar]);
+        if (rowCount === 0) return res.status(404).json({ error: 'Citizen not found' });
+        res.json({ success: true });
+    } catch (err) {
+        res.status(500).json({ error: 'Failed to remove citizen' });
+    }
+});
+
+// ── Observer Management ──────────────────────────────────
+
+// GET /api/sysadmin/observers - List all observers
+app.get('/api/sysadmin/observers', verifySysAdmin, async (req, res) => {
+    try {
+        const { rows } = await pool.query('SELECT id, username, full_name, email, role, created_at FROM observers ORDER BY created_at DESC');
+        res.json(rows);
+    } catch (err) {
+        res.status(500).json({ error: 'Failed to fetch observers' });
+    }
+});
+
+// POST /api/sysadmin/observers - Create observer
+app.post('/api/sysadmin/observers', verifySysAdmin, async (req, res) => {
+    try {
+        const { username, password, fullName, email, role } = req.body;
+        if (!username || !password) return res.status(400).json({ error: 'username and password are required' });
+        const { rows } = await pool.query(
+            'INSERT INTO observers (username, password, full_name, email, role) VALUES ($1, $2, $3, $4, $5) RETURNING id, username, full_name, email, role',
+            [username, password, fullName || '', email || null, role || 'general']
+        );
+        res.status(201).json({ success: true, observer: rows[0] });
+    } catch (err) {
+        if (err.code === '23505') return res.status(409).json({ error: 'Username already exists' });
+        res.status(500).json({ error: 'Failed to create observer' });
+    }
+});
+
+// DELETE /api/sysadmin/observers/:id - Remove observer
+app.delete('/api/sysadmin/observers/:id', verifySysAdmin, async (req, res) => {
+    try {
+        const { id } = req.params;
+        const { rowCount } = await pool.query('DELETE FROM observers WHERE id = $1', [id]);
+        if (rowCount === 0) return res.status(404).json({ error: 'Observer not found' });
+        res.json({ success: true });
+    } catch (err) {
+        res.status(500).json({ error: 'Failed to delete observer' });
+    }
+});
+
+// ── Voter Data Export ────────────────────────────────────
+
+// GET /api/sysadmin/export-voters - CSV export of all voters
+app.get('/api/sysadmin/export-voters', verifySysAdmin, async (req, res) => {
+    try {
+        const { constituency } = req.query;
+        let query = 'SELECT id, name, surname, constituency, district, state, gender, mobile, email, has_voted, created_at FROM voters';
+        const params = [];
+        if (constituency) { params.push(constituency); query += ' WHERE constituency = $1'; }
+        query += ' ORDER BY constituency, name';
+        const { rows } = await pool.query(query, params);
+
+        const headers = ['Voter ID', 'Name', 'Surname', 'Constituency', 'District', 'State', 'Gender', 'Mobile', 'Email', 'Has Voted', 'Registered On'];
+        const csvRows = [headers.join(',')];
+        for (const r of rows) {
+            csvRows.push([
+                r.id, `"${r.name || ''}"`, `"${r.surname || ''}"`,
+                `"${r.constituency || ''}"`, `"${r.district || ''}"`, `"${r.state || ''}"`,
+                r.gender || '', r.mobile || '', r.email || '',
+                r.has_voted ? 'Yes' : 'No',
+                r.created_at ? new Date(r.created_at).toISOString().split('T')[0] : ''
+            ].join(','));
+        }
+
+        res.setHeader('Content-Type', 'text/csv');
+        res.setHeader('Content-Disposition', `attachment; filename="voters_export_${Date.now()}.csv"`);
+        res.send(csvRows.join('\n'));
+    } catch (err) {
+        console.error('Voter export error:', err);
+        res.status(500).json({ error: 'Export failed' });
+    }
+});
+
 // Export the app for use in index.js
 module.exports = app;
 
