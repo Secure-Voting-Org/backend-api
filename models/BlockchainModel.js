@@ -1,9 +1,9 @@
 const { pool } = require('../config/db');
-const BlockchainUtils = require('../utils/BlockchainUtils');
 
 /**
  * Blockchain Model
  * Manages the persistence of blocks to the blockchain_ledger table.
+ * Genesis Block is managed by BlockchainService, not here.
  */
 
 let dbPool = pool;
@@ -27,47 +27,8 @@ const createBlockchainTable = async () => {
     try {
         await dbPool.query(query);
         console.log("Blockchain Ledger Table Initialized.");
-        await initGenesisBlock();
     } catch (err) {
         console.error("Error creating blockchain table:", err);
-    }
-};
-
-const initGenesisBlock = async () => {
-    try {
-        const { rows } = await dbPool.query('SELECT COUNT(*) FROM blockchain_ledger');
-        if (parseInt(rows[0].count) === 0) {
-            const timestamp = new Date().toISOString();
-            
-            const genesisTx = {
-                transaction_id: 'GENESIS_TX_ID_0',
-                type: 'GENESIS',
-                message: 'SecureVote Election Genesis Block',
-                timestamp: timestamp
-            };
-
-            const merkleRoot = BlockchainUtils.generateMerkleRoot([genesisTx.transaction_id]);
-
-            const genesisHeader = {
-                block_number: 0,
-                previous_hash: '0'.repeat(64),
-                timestamp: timestamp,
-                merkle_root: merkleRoot,
-                nonce: 0
-            };
-
-            const genesisBlockHash = BlockchainUtils.calculateBlockHash(genesisHeader);
-
-            const genesisBlock = {
-                ...genesisHeader,
-                block_hash: genesisBlockHash,
-                transactions: [genesisTx]
-            };
-            await saveBlock(genesisBlock);
-            console.log("Genesis Block (Block 0) Initialized.");
-        }
-    } catch (err) {
-        console.error("Error initializing Genesis Block:", err);
     }
 };
 
@@ -122,7 +83,6 @@ const replaceChain = async (newChain) => {
                 (block_number, previous_hash, merkle_root, nonce, block_hash, transactions, timestamp) 
                 VALUES ($1, $2, $3, $4, $5, $6, $7)
             `;
-            // Ensure transactions is a string for JSONB insertion if not already
             const txData = typeof block.transactions === 'string' ? block.transactions : JSON.stringify(block.transactions);
             const values = [
                 block.block_number, 
@@ -149,7 +109,6 @@ const replaceChain = async (newChain) => {
 
 module.exports = {
     createBlockchainTable,
-    initGenesisBlock,
     saveBlock,
     getLastBlock,
     getAllBlocks,
