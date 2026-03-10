@@ -151,10 +151,17 @@ class BlockchainService {
             const block = blocks[i];
 
             // 1. Verify Header Integrity (Hash Correctness)
+            // Normalize timestamp to ISO string: PostgreSQL returns a Date object,
+            // but when the block was sealed the timestamp was new Date().toISOString().
+            // Without normalization the concatenated header string differs → false hash mismatch.
+            const normalizedTimestamp = block.timestamp instanceof Date
+                ? block.timestamp.toISOString()
+                : block.timestamp;
+
             const expectedHash = BlockchainUtils.calculateBlockHash({
                 block_number: block.block_number,
                 previous_hash: block.previous_hash,
-                timestamp: block.timestamp,
+                timestamp: normalizedTimestamp,
                 merkle_root: block.merkle_root,
                 nonce: block.nonce
             });

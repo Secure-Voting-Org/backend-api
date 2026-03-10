@@ -33,13 +33,15 @@ const createBlockchainTable = async () => {
 };
 
 const saveBlock = async (block) => {
-    const { block_number, previous_hash, merkle_root, nonce, block_hash, transactions } = block;
+    const { block_number, previous_hash, merkle_root, nonce, block_hash, transactions, timestamp } = block;
+    // IMPORTANT: we must persist the EXACT timestamp used when computing the block hash.
+    // Using DEFAULT CURRENT_TIMESTAMP would produce a different value and break hash verification.
     const query = `
     INSERT INTO blockchain_ledger 
-    (block_number, previous_hash, merkle_root, nonce, block_hash, transactions) 
-    VALUES ($1, $2, $3, $4, $5, $6)
+    (block_number, previous_hash, merkle_root, nonce, block_hash, transactions, timestamp) 
+    VALUES ($1, $2, $3, $4, $5, $6, $7)
     RETURNING id;`;
-    const values = [block_number, previous_hash, merkle_root, nonce, block_hash, JSON.stringify(transactions)];
+    const values = [block_number, previous_hash, merkle_root, nonce, block_hash, JSON.stringify(transactions), timestamp];
     const { rows } = await dbPool.query(query, values);
     return rows[0].id;
 };
