@@ -6,7 +6,7 @@ describe('JWT Authentication System', () => {
     const testObserver = {
         fullName: `Vitest User`,
         email: `vitest-${Date.now()}@eci.gov.in`,
-        username: `vitest_obs_${Date.now()}`,
+        mobile_number: `9999${Math.floor(100000 + Math.random() * 900000)}`,
         password: 'password123',
         role: 'general'
     };
@@ -32,7 +32,7 @@ describe('JWT Authentication System', () => {
         const res = await request(app)
             .post('/api/observer/login')
             .send({
-                username: testObserver.username,
+                mobile_number: testObserver.mobile_number,
                 password: testObserver.password,
                 role: testObserver.role
             })
@@ -50,7 +50,7 @@ describe('JWT Authentication System', () => {
 
         // Assert user payload is intact
         expect(res.body.observer).toBeDefined();
-        expect(res.body.observer.username).toBe(testObserver.username);
+        expect(res.body.observer.mobile_number).toBe(testObserver.mobile_number);
     });
 
     it('3. The backend middleware should REJECT missing JWT tokens', async () => {
