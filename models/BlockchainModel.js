@@ -1,4 +1,5 @@
 const { pool } = require('../config/db');
+const BlockchainUtils = require('../utils/BlockchainUtils');
 
 /**
  * Blockchain Model
@@ -36,17 +37,31 @@ const initGenesisBlock = async () => {
     try {
         const { rows } = await dbPool.query('SELECT COUNT(*) FROM blockchain_ledger');
         if (parseInt(rows[0].count) === 0) {
-            const genesisBlock = {
+            const timestamp = new Date().toISOString();
+            
+            const genesisTx = {
+                transaction_id: 'GENESIS_TX_ID_0',
+                type: 'GENESIS',
+                message: 'SecureVote Election Genesis Block',
+                timestamp: timestamp
+            };
+
+            const merkleRoot = BlockchainUtils.generateMerkleRoot([genesisTx.transaction_id]);
+
+            const genesisHeader = {
                 block_number: 0,
                 previous_hash: '0'.repeat(64),
-                merkle_root: 'GENESIS_ROOT',
-                nonce: 0,
-                block_hash: '0'.repeat(64), // In a real system, calculate hash of genesis data
-                transactions: [{
-                    type: 'GENESIS',
-                    message: 'SecureVote Election Genesis Block',
-                    timestamp: new Date().toISOString()
-                }]
+                timestamp: timestamp,
+                merkle_root: merkleRoot,
+                nonce: 0
+            };
+
+            const genesisBlockHash = BlockchainUtils.calculateBlockHash(genesisHeader);
+
+            const genesisBlock = {
+                ...genesisHeader,
+                block_hash: genesisBlockHash,
+                transactions: [genesisTx]
             };
             await saveBlock(genesisBlock);
             console.log("Genesis Block (Block 0) Initialized.");
