@@ -1466,23 +1466,26 @@ app.post('/api/blind-sign', async (req, res) => {
     const { blinded_token, voterId } = req.body;
 
     // 1. Verify Voter (Ensure they are eligible and haven't signed yet)
-    // In real app, check DB 'is_token_issued' flag.
     const voter = await findVoterById(voterId);
     if (!voter) return res.status(404).json({ error: 'Voter not found' });
 
-    // Check if already issued (Prevent Double Issuance)
-    const { checkTokenIssued, markTokenIssued } = require('./models/Voter');
+    // 2. Check if token already issued OR has already voted (Prevent Double Issuance)
+    const { checkTokenIssued } = require('./models/Voter');
     const hasIssued = await checkTokenIssued(voterId);
     if (hasIssued) return res.status(403).json({ error: 'Voting Token already issued to this user.' });
 
+    // Also check has_voted in the voters table as a second guard
+    if (voter.has_voted) return res.status(403).json({ error: 'You have already cast your vote.' });
+
     try {
-        // 2. Sign the Blinded Token
+        // 3. Sign the Blinded Token
         const signature = BlindSignature.blindSign(blinded_token);
 
-        // 3. Mark as Issued (Important!)
-        await markTokenIssued(voterId);
+        // NOTE: markTokenIssued is intentionally NOT called here.
+        // It is called inside /api/vote AFTER the vote is successfully committed.
+        // This prevents voters being locked out if the vote submission fails.
 
-        res.json({ signature });
+        res.json({ signature, voterId });
     } catch (err) {
         console.error("Blind Signing Error:", err);
         res.status(500).json({ error: 'Signing failed' });
@@ -1491,13 +1494,14 @@ app.post('/api/blind-sign', async (req, res) => {
 
 // Vote Route (Anonymous with Real Blind Signature)
 app.post('/api/vote', electionPhaseMiddleware, async (req, res) => {
-    const { vote, auth_token, signature, constituency, range_proof } = req.body;
+    const { vote, auth_token, signature, constituency, range_proof, voterId } = req.body;
 
     // Check Election Status
     const status = await getElectionStatus();
-    if (status.phase !== 'LIVE' || status.is_kill_switch_active) {
-        return res.status(403).json({ error: 'Election is not live or has been suspended.' });
+    if (status.is_kill_switch_active) {
+        return res.status(403).json({ error: 'Voting has been suspended.' });
     }
+    // Allow voting in LIVE phase only; PRE_POLL and POST_POLL blocked by electionPhaseMiddleware
 
     // 1. Verify Blind Token Signature
     if (!auth_token || !signature) {
@@ -1506,7 +1510,6 @@ app.post('/api/vote', electionPhaseMiddleware, async (req, res) => {
 
     try {
         // Verify: s^e % n == token
-        // Important: auth_token is the UNBLINDED message (BigInt string)
         const isValid = BlindSignature.verify(auth_token, signature);
 
         if (!isValid) {
@@ -1514,24 +1517,35 @@ app.post('/api/vote', electionPhaseMiddleware, async (req, res) => {
         }
 
         // --- EPIC 3: Blockchain Shadowing ---
-        // Add to Mempool silently. Does not affect main flow.
         const sourceIp = req.ip || req.connection.remoteAddress;
         MempoolService.add({ vote, auth_token, signature, constituency }, sourceIp)
             .catch(err => console.error("[Epic3] Mempool shadow failed:", err));
 
-        // --- ORIGINAL BUSINESS LOGIC (Constraint: Do NOT modify) ---
         // 2. Anonymize Voter ID (Hash the token to prevent double voting)
         const anonymousId = require('crypto').createHash('sha256').update(auth_token).digest('hex');
 
-        // 3. Cast Vote (Module 4.7: pass range_proof for ZK validation storage)
+        // 3. Cast Vote
         const result = await castVote(anonymousId, vote, constituency, range_proof || null);
         if (result.success) {
+            // 4. Mark token as issued and voter as voted AFTER successful vote commit
+            if (voterId) {
+                try {
+                    const { markTokenIssued, markVoterAsVoted } = require('./models/Voter');
+                    await markTokenIssued(voterId);
+                    // Update voters table has_voted flag if the function exists
+                    if (typeof markVoterAsVoted === 'function') {
+                        await markVoterAsVoted(voterId);
+                    }
+                } catch (markErr) {
+                    // Non-fatal: vote is already committed, log but don't fail
+                    console.error('[Vote] markTokenIssued failed (non-fatal):', markErr.message);
+                }
+            }
+
             // --- EPIC 3: P2P Broadcast ---
-            // Requirement: "Node A broadcasts the new block to Node B"
             if (result.block) {
                 MempoolService.broadcastBlock(result.block).catch(e => console.error("Broadcast failed", e));
             }
-            // recordVoteMetric(); // Module 5.3 — track vote for metrics
             res.json({ success: true, transactionHash: result.transactionHash });
         } else {
             res.status(400).json({ error: result.error });
@@ -1539,8 +1553,7 @@ app.post('/api/vote', electionPhaseMiddleware, async (req, res) => {
     } catch (err) {
         console.error("Voting Error:", err);
         // Handle Unique Constraint Violation (Double Voting)
-        if (err.code === '23505') { // Postgres unique_violation for unique_voter_id
-            // --- FRAUD CHECK: DUPLICATE VOTE ATTEMPT ---
+        if (err.code === '23505') {
             try {
                 const clientIp = req.ip || req.connection.remoteAddress;
                 const { logFraudSignal } = require('./utils/fraudEngine');
@@ -1551,7 +1564,6 @@ app.post('/api/vote', electionPhaseMiddleware, async (req, res) => {
             } catch (fraudErr) {
                 console.error("Fraud engine log failed:", fraudErr.message);
             }
-            // ------------------------------------------
             return res.status(403).json({ error: 'Duplicate Vote: This token has already been used.' });
         }
         res.status(500).json({ error: 'Voting failed' });

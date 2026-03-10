@@ -537,6 +537,9 @@ module.exports = {
     getFlaggedRegistrations,
     checkTokenIssued,
     markTokenIssued,
+    markVoterAsVoted: async (voterId) => {
+        await pool.query('UPDATE voters SET has_voted = TRUE WHERE id = $1', [voterId]);
+    },
     getPendingRegistrations,
     getApprovedRegistrations, // NEW
     getRejectedRegistrations, // NEW
