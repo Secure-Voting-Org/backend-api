@@ -66,8 +66,15 @@ const archiveElectionResults = async (resultsJson, totalVotes) => {
 // Reset System for New Election (Called by SysAdmin)
 const resetElection = async () => {
     try {
-        // Only reset the phase back to PRE_POLL and unpublish results — all vote data is preserved
+        // Reset the phase back to PRE_POLL and unpublish results
         await pool.query('UPDATE election_config SET phase = $1, results_published = FALSE WHERE id = 1', ['PRE_POLL']);
+        
+        // Clear all previous votes
+        await pool.query('TRUNCATE TABLE votes RESTART IDENTITY CASCADE');
+        
+        // Reset all voter participation statuses
+        await pool.query('UPDATE voters SET has_voted = FALSE');
+        
         return { success: true };
     } catch (e) {
         console.error("Error during resetElection:", e);
