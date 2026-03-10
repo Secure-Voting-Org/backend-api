@@ -39,6 +39,7 @@ const { castVote, getTurnoutStats, getPublicLedger, getAllVotes } = require('./m
 const { findAdminByUsername, findAdminByEmail, createAdmin, storeOtp, verifyOtp, updateAdminPassword, getAllAdmins, updateAdmin, deleteAdmin } = require('./models/Admin');
 const { createElectoralRollTable, importElectoralRoll, getElectoralRoll } = require('./models/ElectoralRoll');
 const { findSysAdminByUsername, createSysAdmin, updateSysAdminPassword } = require('./models/SysAdmin');
+const { createTicket, getAllTickets, updateTicketStatus, getTicketById } = require('./models/SupportTicket');
 const { sendOtpEmail } = require('./services/emailService');
 const { getElectionStatus, updateElectionPhase, toggleKillSwitch } = require('./models/Election');
 const { addConstituency, getAllConstituencies, deleteConstituency } = require('./models/Constituency');
@@ -2809,6 +2810,138 @@ app.put('/api/sysadmin/change-password', verifySysAdmin, async (req, res) => {
     } catch (err) {
         console.error(err);
         res.status(500).json({ error: 'Update failed' });
+    }
+});
+
+// ── System Health Metrics ─────────────────────────────────────────────────────
+// GET /api/sysadmin/system-metrics - Live infrastructure metrics
+app.get('/api/sysadmin/system-metrics', verifySysAdmin, async (req, res) => {
+    try {
+        const [sessions, votes, ledger, election] = await Promise.all([
+            pool.query(`SELECT
+                (SELECT COUNT(*) FROM voter_sessions WHERE is_active = true) AS voter_sessions,
+                (SELECT COUNT(*) FROM admin_sessions WHERE is_active = true) AS admin_sessions,
+                (SELECT COUNT(*) FROM sysadmin_sessions WHERE is_active = true) AS sysadmin_sessions`),
+            pool.query('SELECT COUNT(*) AS total FROM votes'),
+            pool.query('SELECT COUNT(*) AS blocks FROM votes'),
+            pool.query('SELECT phase, is_kill_switch_active FROM election_config WHERE id = 1')
+        ]);
+
+        const activeSessions =
+            parseInt(sessions.rows[0].voter_sessions) +
+            parseInt(sessions.rows[0].admin_sessions) +
+            parseInt(sessions.rows[0].sysadmin_sessions);
+
+        const electionData = election.rows[0] || { phase: 'UNKNOWN', is_kill_switch_active: false };
+
+        res.json({
+            activeSessions,
+            sessionBreakdown: {
+                voters: parseInt(sessions.rows[0].voter_sessions),
+                admins: parseInt(sessions.rows[0].admin_sessions),
+                sysadmins: parseInt(sessions.rows[0].sysadmin_sessions),
+            },
+            totalVotes: parseInt(votes.rows[0].total),
+            ledgerBlocks: parseInt(ledger.rows[0].blocks),
+            electionPhase: electionData.phase,
+            killSwitchActive: electionData.is_kill_switch_active,
+            dbStatus: 'connected',
+            timestamp: new Date().toISOString(),
+        });
+    } catch (err) {
+        console.error('System metrics error:', err);
+        res.status(500).json({ error: 'Failed to fetch system metrics' });
+    }
+});
+
+// ── Support Ticket System ──────────────────────────────────────────────────────
+// POST /api/support/ticket - Submit a support ticket (public)
+app.post('/api/support/ticket', async (req, res) => {
+    try {
+        const { subject, message, voter_mobile } = req.body;
+        if (!subject || !message) return res.status(400).json({ error: 'Subject and message are required' });
+        const ticket = await createTicket({ voter_mobile, subject, message });
+        res.status(201).json({ success: true, ticket });
+    } catch (err) {
+        console.error('Create ticket error:', err);
+        res.status(500).json({ error: 'Failed to submit ticket' });
+    }
+});
+
+// GET /api/support/tickets - List all tickets (admin auth)
+app.get('/api/support/tickets', authMiddleware, async (req, res) => {
+    try {
+        const { status } = req.query;
+        const tickets = await getAllTickets(status || null);
+        res.json(tickets);
+    } catch (err) {
+        res.status(500).json({ error: 'Failed to fetch tickets' });
+    }
+});
+
+// PUT /api/support/tickets/:id - Update ticket status (admin auth)
+app.put('/api/support/tickets/:id', authMiddleware, async (req, res) => {
+    try {
+        const { id } = req.params;
+        const { status, admin_notes } = req.body;
+        if (!status) return res.status(400).json({ error: 'Status is required' });
+        const ticket = await updateTicketStatus(id, status, admin_notes);
+        if (!ticket) return res.status(404).json({ error: 'Ticket not found' });
+        res.json({ success: true, ticket });
+    } catch (err) {
+        res.status(500).json({ error: 'Failed to update ticket' });
+    }
+});
+
+// ── Database Backup & Recovery ─────────────────────────────────────────────────
+// GET /api/sysadmin/backup/list - List available backups
+app.get('/api/sysadmin/backup/list', verifySysAdmin, async (req, res) => {
+    try {
+        const { listBackups } = require('./scripts/backup');
+        const backups = listBackups();
+        res.json({ success: true, backups });
+    } catch (err) {
+        res.status(500).json({ error: 'Failed to list backups' });
+    }
+});
+
+// POST /api/sysadmin/backup/trigger - Create a new backup
+app.post('/api/sysadmin/backup/trigger', verifySysAdmin, async (req, res) => {
+    try {
+        const { createBackup, createJsonSnapshot } = require('./scripts/backup');
+        // Try pg_dump first, fall back to JSON snapshot
+        const result = await createJsonSnapshot(
+            require('path').join(__dirname, 'backups', `backup_${Date.now()}.json`)
+        );
+        await createLog({
+            event: 'BACKUP_CREATED',
+            user_id: req.sysadmin.username,
+            details: { filename: result.filename },
+            ip_address: req.ip,
+        });
+        res.json({ success: true, backup: result });
+    } catch (err) {
+        console.error('Backup error:', err);
+        res.status(500).json({ error: 'Backup failed: ' + err.message });
+    }
+});
+
+// POST /api/sysadmin/backup/restore - Restore from a backup file
+app.post('/api/sysadmin/backup/restore', verifySysAdmin, async (req, res) => {
+    try {
+        const { filename } = req.body;
+        if (!filename) return res.status(400).json({ error: 'filename is required' });
+        const { restoreBackup } = require('./scripts/backup');
+        const result = restoreBackup(filename);
+        await createLog({
+            event: 'BACKUP_RESTORED',
+            user_id: req.sysadmin.username,
+            details: { filename },
+            ip_address: req.ip,
+        });
+        res.json({ success: true, result });
+    } catch (err) {
+        res.status(500).json({ error: err.message });
     }
 });
 

@@ -21,6 +21,7 @@ const { createConstituencyTable } = require('./models/Constituency');
 const { createElectoralRollTable } = require('./models/ElectoralRoll');
 const { createRecoveryTable } = require('./models/RecoveryRequest');
 const { createSysAdminTable } = require('./models/SysAdmin');
+const { createSupportTicketTable } = require('./models/SupportTicket');
 const { seedProduction } = require('./scripts/seed_production');
 
 
@@ -48,6 +49,7 @@ checkDbConnection().then(async () => {
         await createElectoralRollTable();
         await createRecoveryTable();
         await createSysAdminTable();
+        await createSupportTicketTable();
 
         // ============================================================
         // SESSION TABLES - Critical for JWT auth on all portals.
