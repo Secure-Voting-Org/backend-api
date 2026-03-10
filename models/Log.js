@@ -1,4 +1,8 @@
 const { pool } = require('../config/db');
+const EventEmitter = require('events');
+
+class LogEmitter extends EventEmitter {}
+const logEmitter = new LogEmitter();
 
 // Create Logs Table
 const createLogTable = async () => {
@@ -17,8 +21,15 @@ const createLogTable = async () => {
 // Insert a log entry
 const createLog = async (logData) => {
     const { event, user_id, details, ip_address } = logData;
-    const query = 'INSERT INTO logs (event, user_id, details, ip_address) VALUES ($1, $2, $3, $4)';
-    await pool.query(query, [event, user_id, JSON.stringify(details), ip_address]);
+    const query = 'INSERT INTO logs (event, user_id, details, ip_address) VALUES ($1, $2, $3, $4) RETURNING *';
+    const { rows } = await pool.query(query, [event, user_id, JSON.stringify(details), ip_address]);
+    
+    // Broadcast the new log for SSE consumers
+    if (rows && rows.length > 0) {
+        logEmitter.emit('new_log', rows[0]);
+    }
+    
+    return rows[0];
 };
 
 // Get All Logs (Read-Only for Auditors)
@@ -36,4 +47,4 @@ const getAllLogs = async (filters = {}) => {
     return rows;
 };
 
-module.exports = { createLogTable, createLog, getAllLogs };
+module.exports = { createLogTable, createLog, getAllLogs, logEmitter };

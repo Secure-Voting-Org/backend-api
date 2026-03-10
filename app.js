@@ -27,7 +27,7 @@ app.use(express.json({ limit: '50mb' }));
 
 const { findVoterById, updateVoterFace, createVoter, saveRegistrationDetails, incrementRetry, lockAccount, resetLocks, getAllVoters, findPendingRegistrationByAadhaar, getFlaggedRegistrations, getPendingRegistrations, getApprovedRegistrations, getRejectedRegistrations, getApplicationDetails, approveRegistration, rejectRegistration, getApplicationStatus, updateVoterId, createVoterRegistrationAuth, findVoterAuthByMobile, findVoterAuthByEmail, updateVoterPassword } = require('./models/Voter');
 
-const { createLog, getAllLogs } = require('./models/Log');
+const { createLog, getAllLogs, logEmitter } = require('./models/Log');
 const { checkIpVelocity, checkDeviceVelocity, checkFaceSimilarity, calculateRiskScore, logFraudSignal } = require('./utils/fraudEngine');
 const { generateToken, createSession, invalidateSession } = require('./utils/authService');
 const authMiddleware = require('./middleware/authMiddleware');
@@ -37,7 +37,8 @@ const { findObserverByMobile, createObserver } = require('./models/Observer');
 const { castVote, getTurnoutStats, getPublicLedger, getAllVotes } = require('./models/Vote');
 
 const { findAdminByUsername, findAdminByEmail, createAdmin, storeOtp, verifyOtp, updateAdminPassword, getAllAdmins, updateAdmin, deleteAdmin } = require('./models/Admin');
-const { findSysAdminByUsername, createSysAdmin } = require('./models/SysAdmin');
+const { createElectoralRollTable, importElectoralRoll, getElectoralRoll } = require('./models/ElectoralRoll');
+const { findSysAdminByUsername, createSysAdmin, updateSysAdminPassword } = require('./models/SysAdmin');
 const { sendOtpEmail } = require('./services/emailService');
 const { getElectionStatus, updateElectionPhase, toggleKillSwitch } = require('./models/Election');
 const { addConstituency, getAllConstituencies, deleteConstituency } = require('./models/Constituency');
@@ -47,6 +48,23 @@ const { loadOrGenerateKeys, getPublicKey, getPrivateKey } = require('./utils/enc
 const MempoolService = require('./utils/MempoolService');
 const BlindSignature = require('./utils/BlindSignature');
 const { pool } = require('./config/db');
+
+// Helper: verify sysadmin token
+const verifySysAdmin = (req, res, next) => {
+    let auth = req.headers.authorization;
+    if (!auth && req.query.token) auth = `Bearer ${req.query.token}`;
+
+    if (!auth || !auth.startsWith('Bearer ')) return res.status(401).json({ error: 'Unauthorized' });
+    try {
+        const jwt = require('jsonwebtoken');
+        const decoded = jwt.verify(auth.split(' ')[1], process.env.JWT_SECRET || 'securevote_secret_key_123');
+        if (decoded.role !== 'SYSADMIN') return res.status(403).json({ error: 'Forbidden' });
+        req.sysadmin = decoded;
+        next();
+    } catch (e) {
+        return res.status(401).json({ error: 'Invalid token' });
+    }
+};
 
 // Load keys on start
 loadOrGenerateKeys().catch(err => console.error("Failed to load election keys:", err));
@@ -149,6 +167,8 @@ app.get('/api/audit/logs', authMiddleware, async (req, res) => {
         res.status(500).json({ error: 'Failed to fetch audit logs' });
     }
 });
+
+
 
 app.get('/api/admin/list', authMiddleware, async (req, res) => {
     try {
@@ -361,6 +381,9 @@ app.post('/api/admin/logout', async (req, res) => {
         res.status(500).json({ error: 'Logout logging failed' });
     }
 });
+
+
+
 
 // INJECT FAKE VOTE (TESTING/DEMO ONLY)
 // Requirement 4.6.3.1: Simulate a database breach to trigger the Math Mismatch fraud alert
@@ -2099,9 +2122,9 @@ app.post('/api/sys-admin/login', async (req, res) => {
         const clientIp = req.ip || req.headers['x-forwarded-for'] || req.connection.remoteAddress;
         const userAgent = req.headers['user-agent'];
 
-        const token = generateToken(admin, deviceHash, 'SYS_ADMIN');
+        const token = generateToken(admin, deviceHash, 'SYSADMIN');
         try {
-            await createSession(admin.id, token, deviceHash, clientIp, userAgent, 'SYS_ADMIN');
+            await createSession(admin.id, token, deviceHash, clientIp, userAgent, 'SYSADMIN');
         } catch (sessionErr) {
             console.error('[SysAdmin Login] Session table error (non-fatal):', sessionErr.message);
         }
@@ -2113,7 +2136,7 @@ app.post('/api/sys-admin/login', async (req, res) => {
                 id: admin.id,
                 username: admin.username,
                 full_name: admin.full_name,
-                role: 'SYS_ADMIN'
+                role: 'SYSADMIN'
             }
         });
     } catch (err) {
@@ -2623,118 +2646,9 @@ app.post('/api/aadhaar/verify-otp', async (req, res) => {
 // Protected by sysadmin JWT (same authMiddleware with role check)
 // =========================================================
 
-// Helper: verify sysadmin token
-const verifySysAdmin = (req, res, next) => {
-    let auth = req.headers.authorization;
-    if (!auth && req.query.token) auth = `Bearer ${req.query.token}`;
 
-    if (!auth || !auth.startsWith('Bearer ')) return res.status(401).json({ error: 'Unauthorized' });
-    try {
-        const jwt = require('jsonwebtoken');
-        const decoded = jwt.verify(auth.split(' ')[1], process.env.JWT_SECRET || 'fallback_secret');
-        if (decoded.role !== 'SYSADMIN') return res.status(403).json({ error: 'Forbidden' });
-        req.sysadmin = decoded;
-        next();
-    } catch (e) {
-        return res.status(401).json({ error: 'Invalid token' });
-    }
-};
 
-// ── Electoral Roll ──────────────────────────────────────
 
-// GET /api/sysadmin/electoral-roll - List all citizens
-app.get('/api/sysadmin/electoral-roll', verifySysAdmin, async (req, res) => {
-    try {
-        const { search, constituency } = req.query;
-        let query = 'SELECT * FROM electoral_roll';
-        const params = [];
-        const conditions = [];
-        if (search) { params.push(`%${search}%`); conditions.push(`(name ILIKE $${params.length} OR aadhaar_number ILIKE $${params.length})`); }
-        if (constituency) { params.push(constituency); conditions.push(`constituency = $${params.length}`); }
-        if (conditions.length > 0) query += ' WHERE ' + conditions.join(' AND ');
-        query += ' ORDER BY created_at DESC LIMIT 200';
-        const { rows } = await pool.query(query, params);
-        res.json(rows);
-    } catch (err) {
-        console.error('Electoral roll list error:', err);
-        res.status(500).json({ error: 'Failed to fetch electoral roll' });
-    }
-});
-
-// POST /api/sysadmin/electoral-roll - Add a citizen
-app.post('/api/sysadmin/electoral-roll', verifySysAdmin, async (req, res) => {
-    try {
-        const { aadhaar_number, name, phone, constituency } = req.body;
-        if (!aadhaar_number || !name || !phone || !constituency) {
-            return res.status(400).json({ error: 'aadhaar_number, name, phone, and constituency are required' });
-        }
-        if (!/^\d{12}$/.test(aadhaar_number)) {
-            return res.status(400).json({ error: 'Aadhaar must be exactly 12 digits' });
-        }
-        const { rows } = await pool.query(
-            `INSERT INTO electoral_roll (aadhaar_number, name, phone, constituency)
-             VALUES ($1, $2, $3, $4) ON CONFLICT (aadhaar_number) DO NOTHING RETURNING *`,
-            [aadhaar_number, name, phone, constituency]
-        );
-        if (rows.length === 0) return res.status(409).json({ error: 'Aadhaar number already exists in electoral roll' });
-        res.status(201).json({ success: true, citizen: rows[0] });
-    } catch (err) {
-        console.error('Add citizen error:', err);
-        res.status(500).json({ error: 'Failed to add citizen' });
-    }
-});
-
-// DELETE /api/sysadmin/electoral-roll/:aadhaar - Remove a citizen
-app.delete('/api/sysadmin/electoral-roll/:aadhaar', verifySysAdmin, async (req, res) => {
-    try {
-        const { aadhaar } = req.params;
-        const { rowCount } = await pool.query('DELETE FROM electoral_roll WHERE aadhaar_number = $1', [aadhaar]);
-        if (rowCount === 0) return res.status(404).json({ error: 'Citizen not found' });
-        res.json({ success: true });
-    } catch (err) {
-        res.status(500).json({ error: 'Failed to remove citizen' });
-    }
-});
-
-// ── Observer Management ──────────────────────────────────
-
-// GET /api/sysadmin/observers - List all observers
-app.get('/api/sysadmin/observers', verifySysAdmin, async (req, res) => {
-    try {
-        const { rows } = await pool.query('SELECT id, username, full_name, email, role, created_at FROM observers ORDER BY created_at DESC');
-        res.json(rows);
-    } catch (err) {
-        res.status(500).json({ error: 'Failed to fetch observers' });
-    }
-});
-
-// POST /api/sysadmin/observers - Create observer
-app.post('/api/sysadmin/observers', verifySysAdmin, async (req, res) => {
-    try {
-        const { username, password, fullName, email, role } = req.body;
-        if (!username || !password) return res.status(400).json({ error: 'username and password are required' });
-        const { rows } = await pool.query(
-            'INSERT INTO observers (username, password, full_name, email, role) VALUES ($1, $2, $3, $4, $5) RETURNING id, username, full_name, email, role',
-            [username, password, fullName || '', email || null, role || 'general']
-        );
-        res.status(201).json({ success: true, observer: rows[0] });
-    } catch (err) {
-        if (err.code === '23505') return res.status(409).json({ error: 'Username already exists' });
-        res.status(500).json({ error: 'Failed to create observer' });
-    }
-});
-
-// DELETE /api/sysadmin/observers/:id - Remove observer
-app.delete('/api/sysadmin/observers/:id', verifySysAdmin, async (req, res) => {
-    try {
-        const { id } = req.params;
-        const { rowCount } = await pool.query('DELETE FROM observers WHERE id = $1', [id]);
-        if (rowCount === 0) return res.status(404).json({ error: 'Observer not found' });
-        res.json({ success: true });
-    } catch (err) {
-        res.status(500).json({ error: 'Failed to delete observer' });
-    }
-});
 
 // ── Voter Data Export ────────────────────────────────────
 
@@ -2791,7 +2705,7 @@ app.get('/api/audit/stream', verifySysAdmin, (req, res) => {
     let lastId = 0;
     const fetchLatest = async () => {
         try {
-            const { rows } = await pool.query('SELECT * FROM audit_logs ORDER BY id DESC LIMIT 1');
+            const { rows } = await pool.query('SELECT * FROM logs ORDER BY id DESC LIMIT 1');
             if (rows.length > 0 && rows[0].id > lastId) {
                 if (lastId !== 0) {
                     res.write(`data: ${JSON.stringify(rows[0])}\n\n`);
@@ -2813,12 +2727,57 @@ app.get('/api/audit/stream', verifySysAdmin, (req, res) => {
 // ── Blockchain Ledger ────────────────────────────────────
 
 // GET /api/audit/ledger - Get raw blocks
+// ── Blockchain Ledger ────────────────────────────────────
+
+// GET /api/audit/ledger - Get raw blocks for the viewer
 app.get('/api/audit/ledger', verifySysAdmin, async (req, res) => {
     try {
-        const rows = await getPublicLedger(100); // from models/Vote.js
+        const rows = await getPublicLedger(100);
         res.json(rows);
     } catch (err) {
         res.status(500).json({ error: 'Failed to fetch ledger' });
+    }
+});
+
+// ── Electoral Roll Management ──────────────────────────────
+
+// POST /api/electoral-roll/import - Bulk CSV import
+app.post('/api/electoral-roll/import', verifySysAdmin, async (req, res) => {
+    const { csvData } = req.body;
+    try {
+        const result = await importElectoralRoll(csvData);
+        await createLog({
+            event: 'ELECTORAL_ROLL_IMPORTED',
+            user_id: req.sysadmin.username || 'sys_admin',
+            details: { importedCount: result.imported },
+            ip_address: req.ip
+        });
+        res.json({ success: true, message: `Successfully imported ${result.imported} citizens.` });
+    } catch (err) {
+        console.error("Failed to import electoral roll:", err);
+        res.status(500).json({ error: 'Failed to import electoral roll. Check data format.' });
+    }
+});
+
+// GET /api/electoral-roll - List all citizens
+app.get('/api/electoral-roll', verifySysAdmin, async (req, res) => {
+    try {
+        const roll = await getElectoralRoll();
+        res.json(roll);
+    } catch (err) {
+        res.status(500).json({ error: 'Failed to fetch electoral roll' });
+    }
+});
+
+// DELETE /api/electoral-roll/:aadhaar - Remove a citizen
+app.delete('/api/electoral-roll/:aadhaar', verifySysAdmin, async (req, res) => {
+    try {
+        const { aadhaar } = req.params;
+        const { rowCount } = await pool.query('DELETE FROM electoral_roll WHERE aadhaar_number = $1', [aadhaar]);
+        if (rowCount === 0) return res.status(404).json({ error: 'Citizen not found' });
+        res.json({ success: true });
+    } catch (err) {
+        res.status(500).json({ error: 'Failed to remove citizen' });
     }
 });
 
@@ -2830,12 +2789,22 @@ app.put('/api/sysadmin/change-password', verifySysAdmin, async (req, res) => {
         const { currentPassword, newPassword } = req.body;
         if (!currentPassword || !newPassword) return res.status(400).json({ error: 'Missing fields' });
 
-        const admin = await findSysAdminByUsername(req.sysadmin.username || 'sys_admin');
+        const username = req.sysadmin.username;
+        const admin = await findSysAdminByUsername(username);
+        
         if (!admin || admin.password !== currentPassword) {
-            return res.status(401).json({ error: 'Invalid current password' });
+            return res.status(401).json({ error: 'Incorrect current password' });
         }
 
-        await pool.query('UPDATE sys_admins SET password = $1 WHERE username = $2', [newPassword, admin.username]);
+        await updateSysAdminPassword(username, newPassword);
+        
+        await createLog({
+            event: 'SYSADMIN_PASSWORD_CHANGED',
+            user_id: username,
+            details: { status: 'SUCCESS' },
+            ip_address: req.ip
+        });
+
         res.json({ success: true, message: 'Password updated successfully' });
     } catch (err) {
         console.error(err);

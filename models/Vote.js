@@ -12,9 +12,15 @@ const createVoteTable = async () => {
         candidate_id TEXT NOT NULL,     -- Encrypted Vote Data (Ciphertext)
         constituency VARCHAR(100) NOT NULL,
         transaction_hash VARCHAR(64) NOT NULL,
+        prev_hash VARCHAR(64),          -- Added for blockchain integrity
         timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-    )`;
+    ) `;
     await pool.query(query);
+
+    // Ensure prev_hash exists if table was already created without it
+    try {
+        await pool.query('ALTER TABLE votes ADD COLUMN IF NOT EXISTS prev_hash VARCHAR(64)');
+    } catch (e) { /* ignore */ }
 };
 
 // Cast Vote: Inserts a new vote effectively as a block in the chain

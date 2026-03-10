@@ -13,7 +13,9 @@ const ADMIN_IDLE_TIMEOUT_MINUTES = 60;   // Admins/SysAdmins: 60 min idle timeou
 const generateToken = (user, deviceHash, role = 'VOTER') => {
     return jwt.sign(
         {
-            id: user.id || user.mobile || user.username, // Handle different ID fields
+            id: user.id || user.mobile || user.username,
+            username: user.username,
+            mobile: user.mobile,
             role: user.role || role,
             deviceHash: deviceHash
         },
@@ -32,6 +34,7 @@ const getSessionTableConfig = (role) => {
         case 'LIVE':
             return { table: 'admin_sessions', idCol: 'admin_id' };
         case 'SYS_ADMIN':
+        case 'SYSADMIN':
             return { table: 'sysadmin_sessions', idCol: 'sysadmin_id' };
         case 'OBSERVER':
             return { table: 'observer_sessions', idCol: 'observer_id' };
@@ -123,7 +126,7 @@ const verifySession = async (token, deviceHash, role = 'VOTER') => {
         const now = new Date();
         const diffMinutes = (now - lastActive) / 1000 / 60;
 
-        const isAdmin = ['ADMIN', 'ELECTION_ADMIN', 'SYS_ADMIN', 'PRE_POLL', 'POST_POLL', 'LIVE'].includes(tokenRole);
+        const isAdmin = ['ADMIN', 'ELECTION_ADMIN', 'SYS_ADMIN', 'SYSADMIN', 'PRE_POLL', 'POST_POLL', 'LIVE'].includes(tokenRole);
         const idleTimeout = isAdmin ? ADMIN_IDLE_TIMEOUT_MINUTES : VOTER_IDLE_TIMEOUT_MINUTES;
 
         if (diffMinutes > idleTimeout) {

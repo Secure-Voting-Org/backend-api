@@ -48,9 +48,19 @@ const createSysAdmin = async (fullName, email, username, password) => {
     return rows[0];
 };
 
+// Update SysAdmin Password
+const updateSysAdminPassword = async (username, newPassword) => {
+    const { rowCount } = await pool.query(
+        'UPDATE sys_admins SET password = $1 WHERE username = $2',
+        [newPassword, username]
+    );
+    return rowCount > 0;
+};
+
 module.exports = {
     createSysAdminTable,
     seedSysAdmins,
     findSysAdminByUsername,
-    createSysAdmin
+    createSysAdmin,
+    updateSysAdminPassword
 };
