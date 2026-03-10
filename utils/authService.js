@@ -49,6 +49,7 @@ const getSessionTableConfig = (role) => {
  * Invalidates previous active sessions for the same user (Single Concurrent Login).
  */
 const createSession = async (userId, token, deviceHash, ipAddress, userAgent, role = 'VOTER') => {
+    console.log(`[DEBUG] createSession for userId=${userId}, role=${role}`);
     const client = await pool.connect();
     try {
         await client.query('BEGIN');
@@ -91,6 +92,7 @@ const createSession = async (userId, token, deviceHash, ipAddress, userAgent, ro
  * Checks: Token Signature, Expiry, DB Active Status, Idle Timeout, Device Binding.
  */
 const verifySession = async (token, deviceHash, role = 'VOTER') => {
+    console.log(`[DEBUG] verifySession for role=${role}, deviceHash=${deviceHash}`);
     try {
         // 1. Verify JWT Signature
         const decoded = jwt.verify(token, JWT_SECRET);
