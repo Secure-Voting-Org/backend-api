@@ -2515,6 +2515,7 @@ app.get('/api/results/summary', async (req, res) => {
 
         // Read tally results from dedicated table (populated after decryption ceremony)
         let partyResults = [];
+        let constituencyResults = {}; // We will fetch constituency data too
         try {
             const tallyCheck = await pool.query(`
                 SELECT EXISTS (
@@ -2534,8 +2535,50 @@ app.get('/api/results/summary', async (req, res) => {
                     vote_share: r.vote_share
                 }));
             }
+
+            const constCheck = await pool.query(`
+                SELECT EXISTS (
+                    SELECT FROM information_schema.tables
+                    WHERE table_name = 'tally_constituency_results'
+                ) as exists
+            `);
+            if (constCheck.rows[0].exists) {
+                // Return exactly what the Admin computed: {"Constituency Name": {"CandID": count, ...}}
+                const { rows } = await pool.query(`SELECT constituency_name, data FROM tally_constituency_results`);
+                rows.forEach(r => {
+                    constituencyResults[r.constituency_name] = r.data;
+                });
+            }
         } catch (tallyErr) {
-            console.warn('tally_results table not available:', tallyErr.message);
+            console.warn('tally tables not available:', tallyErr.message);
+        }
+
+        // Map Candidate IDs to details
+        let candidateDetails = {};
+        try {
+            const { rows } = await pool.query('SELECT id, name, party, symbol FROM candidates');
+            rows.forEach(c => {
+                candidateDetails[c.id] = c;
+            });
+        } catch (err) {
+            console.error('Failed to fetch candidate details for summary:', err);
+        }
+
+        // Enrich Constituency Results with Candidate details
+        let enrichedConstituencyResults = {};
+        if (Object.keys(constituencyResults).length > 0) {
+            for (const [constName, tallyData] of Object.entries(constituencyResults)) {
+                enrichedConstituencyResults[constName] = {};
+                for (const [candId, count] of Object.entries(tallyData)) {
+                    let details = candidateDetails[candId] || { name: `Candidate ${candId}`, party: 'Unknown' };
+                    enrichedConstituencyResults[constName][candId] = {
+                        count: count,
+                        name: details.name,
+                        party: details.party,
+                        symbol: details.symbol
+                    };
+                }
+            }
         }
 
         res.json({
@@ -2546,7 +2589,8 @@ app.get('/api/results/summary', async (req, res) => {
             turnoutPercentage: voterStats.total_voters > 0
                 ? ((parseInt(voterStats.voted_count) / parseInt(voterStats.total_voters)) * 100).toFixed(2)
                 : '0.00',
-            partyResults
+            partyResults,
+            constituencyResults: enrichedConstituencyResults
         });
     } catch (err) {
         console.error('Error fetching election summary:', err);
@@ -2557,19 +2601,29 @@ app.get('/api/results/summary', async (req, res) => {
 // Save Tally Results (called by Tally.jsx after decryption ceremony)
 app.post('/api/results/tally', async (req, res) => {
     try {
-        const { partyResults } = req.body;
+        const { partyResults, constituencyResults } = req.body;
         // partyResults: [{ party, vote_count, vote_share }]
+        // constituencyResults: { "Delhi": { "uuid1": 500, "uuid2": 450 }, ... }
         if (!partyResults || !Array.isArray(partyResults)) {
             return res.status(400).json({ error: 'partyResults array required' });
         }
 
-        // Create table if it doesn't exist
+        // Create tables if they don't exist
         await pool.query(`
             CREATE TABLE IF NOT EXISTS tally_results (
                 id SERIAL PRIMARY KEY,
                 party VARCHAR(255) NOT NULL,
                 vote_count INTEGER NOT NULL,
                 vote_share VARCHAR(10) NOT NULL,
+                tallied_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        `);
+
+        await pool.query(`
+            CREATE TABLE IF NOT EXISTS tally_constituency_results (
+                id SERIAL PRIMARY KEY,
+                constituency_name VARCHAR(255) UNIQUE NOT NULL,
+                data JSONB NOT NULL,
                 tallied_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         `);
@@ -2581,6 +2635,17 @@ app.post('/api/results/tally', async (req, res) => {
                 'INSERT INTO tally_results (party, vote_count, vote_share) VALUES ($1, $2, $3)',
                 [row.party, row.vote_count, row.vote_share]
             );
+        }
+
+        // Insert Constituency Results
+        if (constituencyResults && typeof constituencyResults === 'object') {
+            await pool.query('DELETE FROM tally_constituency_results');
+            for (const [constName, tallyData] of Object.entries(constituencyResults)) {
+                await pool.query(
+                    'INSERT INTO tally_constituency_results (constituency_name, data) VALUES ($1, $2)',
+                    [constName, JSON.stringify(tallyData)]
+                );
+            }
         }
 
         res.json({ success: true, message: `Saved tally results for ${partyResults.length} parties` });
