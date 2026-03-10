@@ -71,6 +71,14 @@ async function createSessionTables() {
 async function init() {
     console.log("Initializing database for CI tests...");
     await checkDbConnection();
+
+    // DROP TABLES TO ENSURE CLEAN SCHEMA (OPTIONAL BUT RECOMMENDED FOR CI)
+    console.log("Dropping existing tables for clean start...");
+    await pool.query(`
+        DROP TABLE IF EXISTS observer_sessions, admin_sessions, sysadmin_sessions, voter_sessions;
+        DROP TABLE IF EXISTS voters, voter_registrations, voter_registration_auth, logs, candidates, observers, votes, admins, elections, election_history, constituencies, electoral_roll, recovery_requests, sys_admins, admin_otps CASCADE;
+    `);
+
     await createVoterTable();
     await createRegistrationTable();
     await createVoterAuthTable();
@@ -93,6 +101,7 @@ async function init() {
     try {
         await pool.query(`ALTER TABLE voters ADD COLUMN IF NOT EXISTS is_token_issued BOOLEAN DEFAULT FALSE;`);
         await pool.query(`ALTER TABLE votes ADD COLUMN IF NOT EXISTS prev_hash VARCHAR(255);`);
+        await pool.query(`ALTER TABLE votes ALTER COLUMN candidate_id TYPE TEXT USING candidate_id::text;`);
     } catch (err) {
         console.log("Columns likely already exist or schema is fine:", err.message);
     }

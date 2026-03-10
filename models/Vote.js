@@ -12,6 +12,7 @@ const createVoteTable = async () => {
         candidate_id TEXT NOT NULL,     -- Encrypted Vote Data (Ciphertext)
         constituency VARCHAR(100) NOT NULL,
         transaction_hash VARCHAR(64) NOT NULL,
+        prev_hash VARCHAR(64),          -- Links to previous vote hash
         timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP
     )`;
     await pool.query(query);

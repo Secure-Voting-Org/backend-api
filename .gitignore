@@ -53,5 +53,12 @@ Thumbs.db
 *.swp
 
 # Application Specific overrides
-backend-api/config/election_keys.json
-backend-api/config/*_keys.json
+config/*_keys.json
+
+# Test outputs and logs
+test_output.*
+vitest_error.txt
+fraud_test_output.txt
+stdout.log
+stderr.log
+*.log

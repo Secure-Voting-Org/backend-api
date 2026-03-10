@@ -2,7 +2,10 @@ const jwt = require('jsonwebtoken');
 const { pool } = require('../config/db');
 
 // Secret Key (In prod, use env variable)
-const JWT_SECRET = process.env.JWT_SECRET || 'securevote_secret_key_123';
+const JWT_SECRET = process.env.JWT_SECRET || (process.env.NODE_ENV === 'production' ? null : 'securevote_secret_key_123');
+if (!JWT_SECRET && process.env.NODE_ENV === 'production') {
+    throw new Error('JWT_SECRET environment variable is required in production');
+}
 const TOKEN_EXPIRY = '8h'; // Token valid for 8 hours
 const VOTER_IDLE_TIMEOUT_MINUTES = 15;    // Voters: 15 min idle timeout
 const ADMIN_IDLE_TIMEOUT_MINUTES = 60;   // Admins/SysAdmins: 60 min idle timeout

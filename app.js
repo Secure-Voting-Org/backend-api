@@ -33,7 +33,7 @@ const { generateToken, createSession, invalidateSession } = require('./utils/aut
 const authMiddleware = require('./middleware/authMiddleware');
 
 const { getCandidatesByConstituency, getCandidatesByMetadata, createCandidate, getAllCandidates, updateCandidate, deleteCandidate } = require('./models/Candidate');
-const { findObserverByMobile, createObserver } = require('./models/Observer');
+const { findObserverByUsername, createObserver } = require('./models/Observer');
 const { castVote, getTurnoutStats, getPublicLedger, getAllVotes } = require('./models/Vote');
 
 const { findAdminByUsername, findAdminByEmail, createAdmin, storeOtp, verifyOtp, updateAdminPassword, getAllAdmins, updateAdmin, deleteAdmin } = require('./models/Admin');
@@ -44,7 +44,10 @@ const { addConstituency, getAllConstituencies, deleteConstituency } = require('.
 const { findCitizen } = require('./models/ElectoralRoll');
 const { createRecoveryRequest, getRecoveryRequest, updateRecoveryStatus, getAllRecoveryRequests } = require('./models/RecoveryRequest');
 const { loadOrGenerateKeys, getPublicKey, getPrivateKey } = require('./utils/encryption_keys');
+const BlockchainService = require('./services/BlockchainService');
 const MempoolService = require('./utils/MempoolService');
+const SmartContract = require('./utils/SmartContract');
+const P2PService = require('./utils/P2PService');
 const BlindSignature = require('./utils/BlindSignature');
 const { pool } = require('./config/db');
 
@@ -374,8 +377,8 @@ app.post('/api/admin/inject-fake-vote', async (req, res) => {
         // This query forcibly inserts a vote directly into the database,
         // bypassing the Blind Signature verification and Issued Token checks.
         await pool.query(`
-            INSERT INTO votes (voter_id, candidate_id, constituency, transaction_hash)
-            VALUES ($1, 'FAKE_CANDIDATE', 'SYSTEM_ROOT', $2)
+            INSERT INTO votes (voter_id, candidate_id, constituency, transaction_hash, prev_hash)
+            VALUES ($1, 'FAKE_CANDIDATE', 'SYSTEM_ROOT', $2, '0000000000000000000000000000000000000000000000000000000000000000')
         `, [fakeVoterId, uuid]);
 
         res.json({ success: true, message: 'Fake vote injected. Watchdog will catch this.' });
@@ -645,15 +648,43 @@ app.get('/api/election/status', async (req, res) => {
 
 // --- P2P & INTEGRITY ROUTES ---
 
-// Receive Block from Peer (Simulation)
+// Receive Block from Peer (User Story 3.9: Conflict Resolution)
 app.post('/api/p2p/block', async (req, res) => {
     const { block } = req.body;
-    // In a real P2P system, we would:
-    // 1. Validate the block hash (PoW or Signature)
-    // 2. Validate prev_hash matches our last block
-    // 3. Add to our chain if valid
-    console.log(`[P2P] Received block ${block.transaction_hash} from peer.`);
-    res.json({ success: true, message: 'Block received' });
+    const peerUrl = req.body.peerUrl || `http://${req.ip}:5000`; // Best effort to identify peer
+
+    if (block) {
+        BlockchainService.handleIncomingBlock(block, peerUrl)
+            .catch(e => console.error("[P2P] Block processing failed:", e));
+    }
+    
+    res.json({ success: true, message: 'Block received for processing' });
+});
+
+// GET Full Chain (User Story 3.9: Syncing)
+app.get('/api/p2p/chain', async (req, res) => {
+    try {
+        const { getAllBlocks } = require('./models/BlockchainModel');
+        const chain = await getAllBlocks();
+        res.json({ success: true, chain });
+    } catch (err) {
+        res.status(500).json({ error: 'Failed to fetch chain' });
+    }
+});
+
+// GET Peers List (User Story 3.8)
+app.get('/api/p2p/peers', (req, res) => {
+    res.json({ success: true, peers: P2PService.getPeers() });
+});
+
+// JOIN Network (User Story 3.8)
+app.post('/api/p2p/join', (req, res) => {
+    const { url } = req.body;
+    if (P2PService.addPeer(url)) {
+        res.json({ success: true, message: 'Added to peer list' });
+    } else {
+        res.json({ success: true, message: 'Already in peer list or invalid URL' });
+    }
 });
 
 // 3.5 Integrity Alert Monitoring Endpoint
@@ -1344,7 +1375,7 @@ app.get('/api/voter/ballot/:voterId', async (req, res) => {
 
 // Verify Voter ID (Encrypted)
 const CryptoJS = require('crypto-js');
-const SECRET_KEY = "SECURE_VOTING_NFC_SECRET"; // In prod, use env var
+const SECRET_KEY = process.env.NFC_SECRET_KEY || "SECURE_VOTING_NFC_SECRET"; // In prod, use env var
 
 app.post('/api/verify-voter', async (req, res) => {
     let { voterId } = req.body;
@@ -1481,12 +1512,13 @@ app.post('/api/vote', electionPhaseMiddleware, async (req, res) => {
     }
 
     try {
-        // Verify: s^e % n == token
-        // Important: auth_token is the UNBLINDED message (BigInt string)
-        const isValid = BlindSignature.verify(auth_token, signature);
-
-        if (!isValid) {
-            return res.status(401).json({ error: 'Invalid Blind Signature' });
+        // --- SMART CONTRACT VALIDATION (Requirement 3.7.1.1) ---
+        // Synchronously validate the vote before processing further
+        const contractResult = await SmartContract.invokeVote({ vote, auth_token, signature, constituency });
+        
+        if (!contractResult.isValid) {
+            console.warn(`[SmartContract] REJECTED vote from ${req.ip}: ${contractResult.error}`);
+            return res.status(401).json({ error: contractResult.error });
         }
 
         // --- EPIC 3: Blockchain Shadowing ---
@@ -1536,9 +1568,9 @@ app.post('/api/vote', electionPhaseMiddleware, async (req, res) => {
 
 // Observer Login
 app.post('/api/observer/login', async (req, res) => {
-    const { mobile_number, password, role } = req.body;
+    const { username, password, role } = req.body;
     try {
-        const observer = await findObserverByMobile(mobile_number);
+        const observer = await findObserverByUsername(username);
         if (!observer) {
             return res.status(401).json({ error: 'Invalid credentials' });
         }
@@ -1570,7 +1602,7 @@ app.post('/api/observer/login', async (req, res) => {
             token,
             observer: {
                 id: observer.id,
-                mobile_number: observer.mobile_number,
+                username: observer.username,
                 full_name: observer.full_name,
                 role: observer.role
             }
@@ -1583,25 +1615,25 @@ app.post('/api/observer/login', async (req, res) => {
 
 // Observer Registration
 app.post('/api/observer/register', async (req, res) => {
-    const { mobile_number, password, fullName, role, email } = req.body;
+    const { username, password, fullName, role, email } = req.body;
     try {
-        if (!mobile_number || !password || !fullName || !email) {
+        if (!username || !password || !fullName || !email) {
             return res.status(400).json({ error: 'All fields are required' });
         }
 
         const validRoles = ['general', 'expenditure'];
         const observerRole = validRoles.includes(role) ? role : 'general';
 
-        const existing = await findObserverByMobile(mobile_number);
+        const existing = await findObserverByUsername(username);
         if (existing) {
-            return res.status(400).json({ error: 'Mobile number already exists' });
+            return res.status(400).json({ error: 'Username already exists' });
         }
 
         // In a real app, hash password here
-        await createObserver(mobile_number, password, fullName, observerRole, email);
+        await createObserver(username, password, fullName, observerRole, email);
 
         // Auto-login or just success
-        const observer = await findObserverByMobile(mobile_number);
+        const observer = await findObserverByUsername(username);
 
         // Generate Token & Session
         const deviceHash = req.headers['x-device-hash'];
@@ -1620,7 +1652,7 @@ app.post('/api/observer/register', async (req, res) => {
             token,
             observer: {
                 id: observer.id,
-                mobile_number: observer.mobile_number,
+                username: observer.username,
                 full_name: observer.full_name,
                 role: observer.role,
                 email: observer.email
@@ -2571,279 +2603,6 @@ app.post('/api/results/declare/:constituencyId', async (req, res) => {
     }
 });
 
-// --- AADHAAR API MOCK ---
-const { sendSmsOTP } = require('./services/smsService');
-const aadhaarOtpStore = {}; // in-memory store for demo: { aadhaarNumber: otp }
-
-app.post('/api/aadhaar/generate-otp', async (req, res) => {
-    const { aadhaarNumber, mobileNumber } = req.body;
-    if (!aadhaarNumber || aadhaarNumber.length !== 12) {
-        return res.status(400).json({ error: 'Valid 12-digit Aadhaar number required' });
-    }
-    if (!mobileNumber || mobileNumber.length !== 10) {
-        return res.status(400).json({ error: 'Valid 10-digit mobile number required' });
-    }
-
-    // Generate a 6-digit OTP
-    const otp = Math.floor(100000 + Math.random() * 900000).toString();
-    aadhaarOtpStore[aadhaarNumber] = otp;
-
-    console.log(`[Aadhaar MOCK API] OTP generated for Aadhaar ${aadhaarNumber}: ${otp}`);
-
-    // Send Real SMS
-    const smsResult = await sendSmsOTP(mobileNumber, otp);
-
-    if (smsResult.success) {
-        res.json({ success: true, message: 'OTP sent to registered mobile number' });
-    } else {
-        // Fallback for local testing without Twilio keys
-        console.warn('SMS Failed. Please check backend console for OTP.');
-        res.json({ success: true, message: 'OTP generated (Check backend console - SMS Failed)' });
-    }
-});
-
-app.post('/api/aadhaar/verify-otp', async (req, res) => {
-    const { aadhaarNumber, otp } = req.body;
-
-    if (!aadhaarOtpStore[aadhaarNumber]) {
-        return res.status(400).json({ error: 'OTP expired or not requested' });
-    }
-
-    if (aadhaarOtpStore[aadhaarNumber] !== otp) {
-        return res.status(400).json({ error: 'Invalid OTP' });
-    }
-
-    // Success
-    delete aadhaarOtpStore[aadhaarNumber];
-    res.json({ success: true, message: 'Aadhaar Verified Successfully' });
-});
-
-// =========================================================
-// SYSADMIN ROUTES — Electoral Roll, Observers, Voter Export
-// Protected by sysadmin JWT (same authMiddleware with role check)
-// =========================================================
-
-// Helper: verify sysadmin token
-const verifySysAdmin = (req, res, next) => {
-    let auth = req.headers.authorization;
-    if (!auth && req.query.token) auth = `Bearer ${req.query.token}`;
-
-    if (!auth || !auth.startsWith('Bearer ')) return res.status(401).json({ error: 'Unauthorized' });
-    try {
-        const jwt = require('jsonwebtoken');
-        const decoded = jwt.verify(auth.split(' ')[1], process.env.JWT_SECRET || 'fallback_secret');
-        if (decoded.role !== 'SYSADMIN') return res.status(403).json({ error: 'Forbidden' });
-        req.sysadmin = decoded;
-        next();
-    } catch (e) {
-        return res.status(401).json({ error: 'Invalid token' });
-    }
-};
-
-// ── Electoral Roll ──────────────────────────────────────
-
-// GET /api/sysadmin/electoral-roll - List all citizens
-app.get('/api/sysadmin/electoral-roll', verifySysAdmin, async (req, res) => {
-    try {
-        const { search, constituency } = req.query;
-        let query = 'SELECT * FROM electoral_roll';
-        const params = [];
-        const conditions = [];
-        if (search) { params.push(`%${search}%`); conditions.push(`(name ILIKE $${params.length} OR aadhaar_number ILIKE $${params.length})`); }
-        if (constituency) { params.push(constituency); conditions.push(`constituency = $${params.length}`); }
-        if (conditions.length > 0) query += ' WHERE ' + conditions.join(' AND ');
-        query += ' ORDER BY created_at DESC LIMIT 200';
-        const { rows } = await pool.query(query, params);
-        res.json(rows);
-    } catch (err) {
-        console.error('Electoral roll list error:', err);
-        res.status(500).json({ error: 'Failed to fetch electoral roll' });
-    }
-});
-
-// POST /api/sysadmin/electoral-roll - Add a citizen
-app.post('/api/sysadmin/electoral-roll', verifySysAdmin, async (req, res) => {
-    try {
-        const { aadhaar_number, name, phone, constituency } = req.body;
-        if (!aadhaar_number || !name || !phone || !constituency) {
-            return res.status(400).json({ error: 'aadhaar_number, name, phone, and constituency are required' });
-        }
-        if (!/^\d{12}$/.test(aadhaar_number)) {
-            return res.status(400).json({ error: 'Aadhaar must be exactly 12 digits' });
-        }
-        const { rows } = await pool.query(
-            `INSERT INTO electoral_roll (aadhaar_number, name, phone, constituency)
-             VALUES ($1, $2, $3, $4) ON CONFLICT (aadhaar_number) DO NOTHING RETURNING *`,
-            [aadhaar_number, name, phone, constituency]
-        );
-        if (rows.length === 0) return res.status(409).json({ error: 'Aadhaar number already exists in electoral roll' });
-        res.status(201).json({ success: true, citizen: rows[0] });
-    } catch (err) {
-        console.error('Add citizen error:', err);
-        res.status(500).json({ error: 'Failed to add citizen' });
-    }
-});
-
-// DELETE /api/sysadmin/electoral-roll/:aadhaar - Remove a citizen
-app.delete('/api/sysadmin/electoral-roll/:aadhaar', verifySysAdmin, async (req, res) => {
-    try {
-        const { aadhaar } = req.params;
-        const { rowCount } = await pool.query('DELETE FROM electoral_roll WHERE aadhaar_number = $1', [aadhaar]);
-        if (rowCount === 0) return res.status(404).json({ error: 'Citizen not found' });
-        res.json({ success: true });
-    } catch (err) {
-        res.status(500).json({ error: 'Failed to remove citizen' });
-    }
-});
-
-// ── Observer Management ──────────────────────────────────
-
-// GET /api/sysadmin/observers - List all observers
-app.get('/api/sysadmin/observers', verifySysAdmin, async (req, res) => {
-    try {
-        const { rows } = await pool.query('SELECT id, username, full_name, email, role, created_at FROM observers ORDER BY created_at DESC');
-        res.json(rows);
-    } catch (err) {
-        res.status(500).json({ error: 'Failed to fetch observers' });
-    }
-});
-
-// POST /api/sysadmin/observers - Create observer
-app.post('/api/sysadmin/observers', verifySysAdmin, async (req, res) => {
-    try {
-        const { username, password, fullName, email, role } = req.body;
-        if (!username || !password) return res.status(400).json({ error: 'username and password are required' });
-        const { rows } = await pool.query(
-            'INSERT INTO observers (username, password, full_name, email, role) VALUES ($1, $2, $3, $4, $5) RETURNING id, username, full_name, email, role',
-            [username, password, fullName || '', email || null, role || 'general']
-        );
-        res.status(201).json({ success: true, observer: rows[0] });
-    } catch (err) {
-        if (err.code === '23505') return res.status(409).json({ error: 'Username already exists' });
-        res.status(500).json({ error: 'Failed to create observer' });
-    }
-});
-
-// DELETE /api/sysadmin/observers/:id - Remove observer
-app.delete('/api/sysadmin/observers/:id', verifySysAdmin, async (req, res) => {
-    try {
-        const { id } = req.params;
-        const { rowCount } = await pool.query('DELETE FROM observers WHERE id = $1', [id]);
-        if (rowCount === 0) return res.status(404).json({ error: 'Observer not found' });
-        res.json({ success: true });
-    } catch (err) {
-        res.status(500).json({ error: 'Failed to delete observer' });
-    }
-});
-
-// ── Voter Data Export ────────────────────────────────────
-
-// GET /api/sysadmin/export-voters - CSV export of all voters
-app.get('/api/sysadmin/export-voters', verifySysAdmin, async (req, res) => {
-    try {
-        const { constituency } = req.query;
-        let query = 'SELECT id, name, surname, constituency, district, state, gender, mobile, email, has_voted, created_at FROM voters';
-        const params = [];
-        if (constituency) { params.push(constituency); query += ' WHERE constituency = $1'; }
-        query += ' ORDER BY constituency, name';
-        const { rows } = await pool.query(query, params);
-
-        const headers = ['Voter ID', 'Name', 'Surname', 'Constituency', 'District', 'State', 'Gender', 'Mobile', 'Email', 'Has Voted', 'Registered On'];
-        const csvRows = [headers.join(',')];
-        for (const r of rows) {
-            csvRows.push([
-                r.id, `"${r.name || ''}"`, `"${r.surname || ''}"`,
-                `"${r.constituency || ''}"`, `"${r.district || ''}"`, `"${r.state || ''}"`,
-                r.gender || '', r.mobile || '', r.email || '',
-                r.has_voted ? 'Yes' : 'No',
-                r.created_at ? new Date(r.created_at).toISOString().split('T')[0] : ''
-            ].join(','));
-        }
-
-        res.setHeader('Content-Type', 'text/csv');
-        res.setHeader('Content-Disposition', `attachment; filename="voters_export_${Date.now()}.csv"`);
-        res.send(csvRows.join('\n'));
-    } catch (err) {
-        console.error('Voter export error:', err);
-        res.status(500).json({ error: 'Export failed' });
-    }
-});
-
-// ── SSE Real-Time Audit Stream ─────────────────────────
-
-// GET /api/audit/stream - Server-Sent Events for live logs
-app.get('/api/audit/stream', verifySysAdmin, (req, res) => {
-    res.setHeader('Content-Type', 'text/event-stream');
-    res.setHeader('Cache-Control', 'no-cache');
-    res.setHeader('Connection', 'keep-alive');
-    res.flushHeaders(); // flush the headers to establish SSE connection immediately
-
-    // Send an initial ping
-    res.write('data: {"type": "ping"}\n\n');
-
-    const handleNewLog = (channel, payload) => {
-        // payload from pg_notify is usually just the JSON string
-        res.write(`data: ${payload}\n\n`);
-    };
-
-    // We can simulate the live feed by polling or using PG Notify
-    // For simplicity without setting up PG triggers: poll every 3s
-    let lastId = 0;
-    const fetchLatest = async () => {
-        try {
-            const { rows } = await pool.query('SELECT * FROM audit_logs ORDER BY id DESC LIMIT 1');
-            if (rows.length > 0 && rows[0].id > lastId) {
-                if (lastId !== 0) {
-                    res.write(`data: ${JSON.stringify(rows[0])}\n\n`);
-                }
-                lastId = rows[0].id;
-            }
-        } catch (err) { /* ignore */ }
-    };
-
-    // Initial fetch to get max id
-    fetchLatest();
-    const interval = setInterval(fetchLatest, 3000);
-
-    req.on('close', () => {
-        clearInterval(interval);
-    });
-});
-
-// ── Blockchain Ledger ────────────────────────────────────
-
-// GET /api/audit/ledger - Get raw blocks
-app.get('/api/audit/ledger', verifySysAdmin, async (req, res) => {
-    try {
-        const rows = await getPublicLedger(100); // from models/Vote.js
-        res.json(rows);
-    } catch (err) {
-        res.status(500).json({ error: 'Failed to fetch ledger' });
-    }
-});
-
-// ── SysAdmin Profile ─────────────────────────────────────
-
-// PUT /api/sysadmin/change-password
-app.put('/api/sysadmin/change-password', verifySysAdmin, async (req, res) => {
-    try {
-        const { currentPassword, newPassword } = req.body;
-        if (!currentPassword || !newPassword) return res.status(400).json({ error: 'Missing fields' });
-
-        const admin = await findSysAdminByUsername(req.sysadmin.username || 'sys_admin');
-        if (!admin || admin.password !== currentPassword) {
-            return res.status(401).json({ error: 'Invalid current password' });
-        }
-
-        await pool.query('UPDATE sys_admins SET password = $1 WHERE username = $2', [newPassword, admin.username]);
-        res.json({ success: true, message: 'Password updated successfully' });
-    } catch (err) {
-        console.error(err);
-        res.status(500).json({ error: 'Update failed' });
-    }
-});
-
 // Export the app for use in index.js
 module.exports = app;
-
 
