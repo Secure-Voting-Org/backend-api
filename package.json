@@ -28,7 +28,8 @@
     "paillier-bigint": "^3.4.3",
     "pg": "^8.18.0",
     "secrets.js-grempe": "^2.0.0",
-    "twilio": "^5.12.2"
+    "twilio": "^5.12.2",
+    "ws": "^8.19.0"
   },
   "devDependencies": {
     "@vitest/ui": "^4.0.18",
