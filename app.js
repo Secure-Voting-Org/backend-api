@@ -199,6 +199,32 @@ app.delete('/api/admin/:id', authMiddleware, async (req, res) => {
     }
 });
 
+// Secure Decryption Key Access
+app.get('/api/sysadmin/election/keys', verifySysAdmin, async (req, res) => {
+    try {
+        const { getElectionStatus } = require('./models/Election');
+        const status = await getElectionStatus();
+        
+        if (status.phase !== 'POST_POLL') {
+            return res.status(403).json({ error: 'Forbidden: Keys are locked. Keys can only be accessed during the POST_POLL phase.' });
+        }
+
+        const fs = require('fs');
+        const path = require('path');
+        const sharesFile = path.join(__dirname, 'config', 'election_key_shares.json');
+        
+        if (!fs.existsSync(sharesFile)) {
+            return res.status(404).json({ error: 'Key shares not found on server.' });
+        }
+
+        const keysData = JSON.parse(fs.readFileSync(sharesFile, 'utf8'));
+        res.json({ success: true, shares: keysData.shares });
+    } catch (err) {
+        console.error('Error fetching key shares:', err);
+        res.status(500).json({ error: 'Failed to securely fetch key shares' });
+    }
+});
+
 app.put('/api/admin/:id', verifySysAdmin, async (req, res) => {
     const { fullName, email, role, password } = req.body;
     try {
@@ -765,6 +791,22 @@ app.post('/api/election/update', verifySysAdmin, async (req, res) => {
         res.json({ success: true });
     } catch (err) {
         res.status(500).json({ error: 'Update failed' });
+    }
+});
+
+// POST Publish Results (Election Admin or SysAdmin)
+app.post('/api/admin/election/publish-results', async (req, res) => {
+    try {
+        const { isPublished } = req.body;
+        const { togglePublishResults } = require('./models/Election');
+        if (typeof isPublished !== 'boolean') {
+            return res.status(400).json({ error: 'Invalid payload: isPublished must be boolean' });
+        }
+        await togglePublishResults(isPublished);
+        res.json({ success: true, isPublished });
+    } catch (err) {
+        console.error("Error toggling publish results:", err);
+        res.status(500).json({ error: 'Failed to toggle publish results' });
     }
 });
 
@@ -2455,37 +2497,46 @@ app.get('/api/results/constituency/:id', async (req, res) => {
 // Get Overall Election Summary
 app.get('/api/results/summary', async (req, res) => {
     try {
-        // Get all constituencies
+        // Count constituencies
         const { rows: constituencies } = await pool.query('SELECT * FROM constituencies');
 
-        // Get total votes cast
+        // Count total raw votes (candidate_id stores encrypted data, so just COUNT rows)
         const { rows: [voteStats] } = await pool.query('SELECT COUNT(*) as total_votes FROM votes');
 
-        // Get total registered voters
+        // Count registered voters and those who have voted
         const { rows: [voterStats] } = await pool.query(`
             SELECT
-            COUNT(*) as total_voters,
+                COUNT(*) as total_voters,
                 COUNT(CASE WHEN has_voted = true THEN 1 END) as voted_count
             FROM voters
-                `);
-
-        // Get party-wise results
-        const { rows: partyResults } = await pool.query(`
-            SELECT
-            c.party,
-                COUNT(v.id) as vote_count
-            FROM candidates c
-            LEFT JOIN votes v ON v.candidate_id = c.id
-            GROUP BY c.party
-            ORDER BY vote_count DESC
-                `);
+        `);
 
         const totalVotes = parseInt(voteStats.total_votes);
-        const partyResultsWithPercentage = partyResults.map(p => ({
-            ...p,
-            vote_count: parseInt(p.vote_count),
-            vote_share: totalVotes > 0 ? ((parseInt(p.vote_count) / totalVotes) * 100).toFixed(2) : '0.00'
-        }));
+
+        // Read tally results from dedicated table (populated after decryption ceremony)
+        let partyResults = [];
+        try {
+            const tallyCheck = await pool.query(`
+                SELECT EXISTS (
+                    SELECT FROM information_schema.tables
+                    WHERE table_name = 'tally_results'
+                ) as exists
+            `);
+            if (tallyCheck.rows[0].exists) {
+                const { rows } = await pool.query(`
+                    SELECT party, vote_count, vote_share
+                    FROM tally_results
+                    ORDER BY vote_count DESC
+                `);
+                partyResults = rows.map(r => ({
+                    party: r.party,
+                    vote_count: parseInt(r.vote_count),
+                    vote_share: r.vote_share
+                }));
+            }
+        } catch (tallyErr) {
+            console.warn('tally_results table not available:', tallyErr.message);
+        }
 
         res.json({
             totalConstituencies: constituencies.length,
@@ -2495,11 +2546,47 @@ app.get('/api/results/summary', async (req, res) => {
             turnoutPercentage: voterStats.total_voters > 0
                 ? ((parseInt(voterStats.voted_count) / parseInt(voterStats.total_voters)) * 100).toFixed(2)
                 : '0.00',
-            partyResults: partyResultsWithPercentage
+            partyResults
         });
     } catch (err) {
         console.error('Error fetching election summary:', err);
         res.status(500).json({ error: 'Failed to fetch summary' });
+    }
+});
+
+// Save Tally Results (called by Tally.jsx after decryption ceremony)
+app.post('/api/results/tally', async (req, res) => {
+    try {
+        const { partyResults } = req.body;
+        // partyResults: [{ party, vote_count, vote_share }]
+        if (!partyResults || !Array.isArray(partyResults)) {
+            return res.status(400).json({ error: 'partyResults array required' });
+        }
+
+        // Create table if it doesn't exist
+        await pool.query(`
+            CREATE TABLE IF NOT EXISTS tally_results (
+                id SERIAL PRIMARY KEY,
+                party VARCHAR(255) NOT NULL,
+                vote_count INTEGER NOT NULL,
+                vote_share VARCHAR(10) NOT NULL,
+                tallied_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        `);
+
+        // Clear old results and insert new
+        await pool.query('DELETE FROM tally_results');
+        for (const row of partyResults) {
+            await pool.query(
+                'INSERT INTO tally_results (party, vote_count, vote_share) VALUES ($1, $2, $3)',
+                [row.party, row.vote_count, row.vote_share]
+            );
+        }
+
+        res.json({ success: true, message: `Saved tally results for ${partyResults.length} parties` });
+    } catch (err) {
+        console.error('Error saving tally results:', err);
+        res.status(500).json({ error: 'Failed to save tally results' });
     }
 });
 

@@ -9,9 +9,16 @@ const createElectionTable = async () => {
         start_time TIMESTAMP,
         end_time TIMESTAMP,
         is_kill_switch_active BOOLEAN DEFAULT FALSE,
+        results_published BOOLEAN DEFAULT FALSE,
         CONSTRAINT single_row CHECK (id = 1)
     )`;
     await pool.query(query);
+    
+    // Auto-migration for existing setups
+    try {
+        await pool.query('ALTER TABLE election_config ADD COLUMN IF NOT EXISTS results_published BOOLEAN DEFAULT FALSE');
+    } catch(e) {}
+    
     console.log("Election Config table checked/created.");
     await initElectionConfig();
 };
@@ -43,6 +50,12 @@ const toggleKillSwitch = async (isActive) => {
     return { success: true, is_kill_switch_active: isActive };
 };
 
+// Toggle Publish Results
+const togglePublishResults = async (isPublished) => {
+    await pool.query('UPDATE election_config SET results_published = $1 WHERE id = 1', [isPublished]);
+    return { success: true, results_published: isPublished };
+};
+
 // Archive Results (Called by Election Admin after Decryption)
 const archiveElectionResults = async (resultsJson, totalVotes) => {
     const { saveElectionResult } = require('./ElectionHistory');
@@ -52,36 +65,13 @@ const archiveElectionResults = async (resultsJson, totalVotes) => {
 
 // Reset System for New Election (Called by SysAdmin)
 const resetElection = async () => {
-    const fs = require('fs');
-    const path = require('path');
-
-    const client = await pool.connect();
     try {
-        await client.query('BEGIN');
-
-        // Clear votes completely so table is empty
-        await client.query('TRUNCATE TABLE votes RESTART IDENTITY');
-
-        // Reset has_voted for all voters
-        await client.query('UPDATE voters SET has_voted = FALSE');
-
-        // Set phase back to PRE_POLL
-        await client.query('UPDATE election_config SET phase = $1 WHERE id = 1', ['PRE_POLL']);
-
-        // Delete existing Cryptographic Keys
-        const keysFile = path.join(__dirname, '../config/election_keys.json');
-        const sharesFile = path.join(__dirname, '../config/election_key_shares.json');
-        if (fs.existsSync(keysFile)) fs.unlinkSync(keysFile);
-        if (fs.existsSync(sharesFile)) fs.unlinkSync(sharesFile);
-
-        await client.query('COMMIT');
+        // Only reset the phase back to PRE_POLL and unpublish results — all vote data is preserved
+        await pool.query('UPDATE election_config SET phase = $1, results_published = FALSE WHERE id = 1', ['PRE_POLL']);
         return { success: true };
     } catch (e) {
-        await client.query('ROLLBACK');
         console.error("Error during resetElection:", e);
         throw e;
-    } finally {
-        client.release();
     }
 };
 
@@ -90,6 +80,7 @@ module.exports = {
     getElectionStatus,
     updateElectionPhase,
     toggleKillSwitch,
+    togglePublishResults,
     archiveElectionResults,
     resetElection
 };
