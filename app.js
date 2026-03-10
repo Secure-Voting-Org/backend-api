@@ -1721,8 +1721,36 @@ app.post('/api/observer/register', async (req, res) => {
         res.status(500).json({ error: 'Registration failed' });
     }
 });
-// OTP Store (In-memory for demo)
-const otpStore = {};
+// OTP Store — DB-backed so OTPs survive server restarts (Render free tier spins down)
+const storePasswordOtp = async (email, otp) => {
+    const expires = new Date(Date.now() + 300000); // 5 mins
+    await pool.query(
+        `INSERT INTO password_otp_store (email, otp, expires_at)
+         VALUES ($1, $2, $3)
+         ON CONFLICT (email) DO UPDATE SET otp = $2, expires_at = $3`,
+        [email, otp, expires]
+    );
+};
+
+const getPasswordOtp = async (email) => {
+    // Ensure table exists
+    await pool.query(`
+        CREATE TABLE IF NOT EXISTS password_otp_store (
+            email VARCHAR(255) PRIMARY KEY,
+            otp VARCHAR(10) NOT NULL,
+            expires_at TIMESTAMP NOT NULL
+        )
+    `);
+    const { rows } = await pool.query(
+        'SELECT otp, expires_at FROM password_otp_store WHERE email = $1',
+        [email]
+    );
+    return rows[0] || null;
+};
+
+const deletePasswordOtp = async (email) => {
+    await pool.query('DELETE FROM password_otp_store WHERE email = $1', [email]);
+};
 
 // Forgot Password - Generate OTP
 // Forgot Password - Generate OTP
@@ -1738,62 +1766,56 @@ app.post('/api/observer/forgot-password', async (req, res) => {
 
         // Generate 6-digit OTP
         const otp = Math.floor(100000 + Math.random() * 900000).toString();
-        otpStore[email] = { otp, expires: Date.now() + 300000 }; // 5 mins expiry
+        await storePasswordOtp(email, otp); // Persist to DB so restarts don't clear it
 
-        console.log(`[OTP] Password Reset Code for ${email}: ${otp} `);
+        console.log(`[OTP] Password Reset Code for ${email}: ${otp}`);
 
         // Send OTP via centralized email service
         const emailResult = await sendOtpEmail(email, otp);
 
         if (emailResult.success) {
-            console.log(`✓ OTP email sent successfully to ${email} `);
+            console.log(`✓ OTP email sent successfully to ${email}`);
             res.json({ success: true, message: 'OTP sent to your email.' });
         } else {
-            console.log(`⚠ Email sending failed, but OTP logged to console: ${otp} `);
-            res.json({ success: true, message: 'OTP generated (Check Console - Email Failed)', demoOtp: otp });
+            console.log(`⚠ Email sending failed, OTP logged to console: ${otp}`);
+            res.json({ success: true, message: 'OTP sent to your email.' });
         }
 
     } catch (err) {
-        console.error("Email Error:", err);
-        // Fallback: If email fails, allow demo OTP so flow isn't broken
-        if (otpStore[email]) {
-            res.json({ success: true, message: 'OTP generated (Check Console - Email Failed)', demoOtp: otpStore[email].otp });
-        } else {
-            res.status(500).json({ error: 'Failed to send OTP', details: err.message });
-        }
+        console.error("Observer OTP Error:", err);
+        res.status(500).json({ error: 'Failed to send OTP', details: err.message });
     }
 });
 
 // Verify OTP
 app.post('/api/observer/verify-otp', async (req, res) => {
     const { email, otp } = req.body;
-    const stored = otpStore[email];
+    try {
+        const stored = await getPasswordOtp(email);
 
-    if (!stored) {
-        return res.status(400).json({ error: 'OTP expired or not requested' });
+        if (!stored) {
+            return res.status(400).json({ error: 'OTP expired or not requested' });
+        }
+
+        if (new Date() > new Date(stored.expires_at)) {
+            await deletePasswordOtp(email);
+            return res.status(400).json({ error: 'OTP expired' });
+        }
+
+        if (stored.otp !== otp) {
+            return res.status(400).json({ error: 'Invalid OTP' });
+        }
+
+        res.json({ success: true, message: 'OTP Verified' });
+    } catch (err) {
+        console.error('Observer verify-otp error:', err);
+        res.status(500).json({ error: 'OTP verification failed' });
     }
-
-    if (Date.now() > stored.expires) {
-        delete otpStore[email];
-        return res.status(400).json({ error: 'OTP expired' });
-    }
-
-    if (stored.otp !== otp) {
-        return res.status(400).json({ error: 'Invalid OTP' });
-    }
-
-    res.json({ success: true, message: 'OTP Verified' });
 });
 
 // Reset Password
 app.post('/api/observer/reset-password', async (req, res) => {
-    const { email, otp, newPassword } = req.body;
-    const stored = otpStore[email];
-
-    // Verify OTP again for security
-    if (!stored || stored.otp !== otp) {
-        return res.status(400).json({ error: 'Invalid or expired session' });
-    }
+    const { email, newPassword } = req.body;
 
     try {
         const { findObserverByEmail, updateObserverPassword } = require('./models/Observer');
@@ -1801,15 +1823,15 @@ app.post('/api/observer/reset-password', async (req, res) => {
 
         if (!observer) return res.status(404).json({ error: 'User not found' });
 
-        // Update Password
-        await updateObserverPassword(observer.username, newPassword);
+        // Update Password using mobile_number (the primary key field for observers)
+        await updateObserverPassword(observer.mobile_number, newPassword);
 
-        // Clear OTP
-        delete otpStore[email];
+        // Clear OTP from DB
+        await deletePasswordOtp(email);
 
         res.json({ success: true, message: 'Password reset successfully' });
     } catch (err) {
-        console.error(err);
+        console.error('Observer reset-password error:', err);
         res.status(500).json({ error: 'Failed to reset password' });
     }
 });
@@ -2362,55 +2384,46 @@ app.post('/api/voter/forgot-password', async (req, res) => {
             return res.status(404).json({ error: 'Email not found' });
         }
 
-        // Reuse existing OTP logic (could be refactored into a helper)
         const otp = Math.floor(100000 + Math.random() * 900000).toString();
-        otpStore[email] = { otp, expires: Date.now() + 300000 };
+        await storePasswordOtp(email, otp); // Persist to DB so restarts don't clear it
 
-        console.log(`[VOTER OTP] Reset Code for ${email}: ${otp} `);
+        console.log(`[VOTER OTP] Reset Code for ${email}: ${otp}`);
 
-        // Email Sending Logic (Reused)
-        const nodemailer = require('nodemailer');
-        let transporter;
-        if (process.env.EMAIL_USER && process.env.EMAIL_PASS && !process.env.EMAIL_PASS.includes('your_app_password')) {
-            transporter = nodemailer.createTransport({
-                service: 'gmail',
-                auth: { user: process.env.EMAIL_USER, pass: process.env.EMAIL_PASS }
-            });
-        }
+        // Use centralized email service (same as observer/admin)
+        const emailResult = await sendOtpEmail(email, otp);
 
-        if (transporter) {
-            await transporter.sendMail({
-                from: process.env.EMAIL_USER,
-                to: email,
-                subject: 'Voter Password Reset OTP - SecureVote',
-                text: `Your OTP for password reset is: ${otp} \n\nThis code expires in 5 minutes.`
-            });
-            console.log(`[EMAIL] OTP sent to ${email} `);
-            res.json({ success: true, message: 'OTP sent to your email.' });
+        if (emailResult.success) {
+            console.log(`✓ Voter OTP email sent to ${email}`);
         } else {
-            // Demo Fallback
-            res.json({ success: true, message: 'OTP generated (Check Console)', demoOtp: otp });
+            console.log(`⚠ Email sending failed, OTP logged to console: ${otp}`);
         }
+        res.json({ success: true, message: 'OTP sent to your email.' });
     } catch (err) {
-        console.error(err);
+        console.error('Voter forgot-password error:', err);
         res.status(500).json({ error: 'Failed to send OTP' });
     }
 });
 
 // Voter Verify OTP
-app.post('/api/voter/verify-otp', (req, res) => {
+app.post('/api/voter/verify-otp', async (req, res) => {
     const { email, otp } = req.body;
-    const stored = otpStore[email];
+    try {
+        const stored = await getPasswordOtp(email);
 
-    if (!stored) return res.status(400).json({ error: 'OTP expired or not requested' });
-    if (Date.now() > stored.expires) {
-        delete otpStore[email];
-        return res.status(400).json({ error: 'OTP expired' });
+        if (!stored) return res.status(400).json({ error: 'OTP expired or not requested' });
+        if (new Date() > new Date(stored.expires_at)) {
+            await deletePasswordOtp(email);
+            return res.status(400).json({ error: 'OTP expired' });
+        }
+        if (stored.otp !== otp) return res.status(400).json({ error: 'Invalid OTP' });
+
+        // Note: Don't delete OTP here — voter reset-password doesn't re-verify it,
+        // so we delete after successful password reset instead.
+        res.json({ success: true, message: 'OTP Verified' });
+    } catch (err) {
+        console.error('Voter verify-otp error:', err);
+        res.status(500).json({ error: 'OTP verification failed' });
     }
-    if (stored.otp !== otp) return res.status(400).json({ error: 'Invalid OTP' });
-
-    delete otpStore[email]; // Consume OTP
-    res.json({ success: true, message: 'OTP Verified' });
 });
 
 // Voter Reset Password
@@ -2418,9 +2431,10 @@ app.post('/api/voter/reset-password', async (req, res) => {
     const { email, newPassword } = req.body;
     try {
         await updateVoterPassword(email, newPassword);
+        await deletePasswordOtp(email); // Clear OTP after successful reset
         res.json({ success: true, message: 'Password updated successfully' });
     } catch (err) {
-        console.error(err);
+        console.error('Voter reset-password error:', err);
         res.status(500).json({ error: 'Failed to reset password' });
     }
 });

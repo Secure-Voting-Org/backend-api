@@ -122,6 +122,14 @@ checkDbConnection().then(async () => {
                 expires_at TIMESTAMP NOT NULL
             );
         `);
+        // OTP Store Table - persists OTPs across server restarts (replaces in-memory store)
+        await pool.query(`
+            CREATE TABLE IF NOT EXISTS password_otp_store (
+                email VARCHAR(255) PRIMARY KEY,
+                otp VARCHAR(10) NOT NULL,
+                expires_at TIMESTAMP NOT NULL
+            )
+        `);
         console.log("✅ All Session Tables Initialized (voter, admin, sysadmin, observer).");
 
         // Seed Observer
